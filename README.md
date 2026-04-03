@@ -1,6 +1,6 @@
 # @possumtech/rummy-web
 
-Web search and fetch plugin for [rummy](https://github.com/possumtech/rummy). Adds `<search>` and URL-aware `<read>` tools powered by Playwright, Mozilla Readability, and SearXNG.
+Web search and fetch plugin for [rummy](https://github.com/possumtech/rummy). Adds `<search>` and URL-aware `<get>` tools powered by Playwright, Mozilla Readability, and SearXNG.
 
 ## Install
 
@@ -52,14 +52,14 @@ Queries SearXNG and creates URL entries from results.
 - Results default to 12; set the `results` attribute to limit.
 - Each result is stored as an `https://` entry at `summary` state with `title + snippet` body.
 - A `search://` result entry is created at `info` state with the URL listing.
-- Use `<read>` on a result URL to fetch the full page.
+- Use `<get>` on a result URL to fetch the full page.
 
-### `<read>` — URL Fetch
+### `<get>` — URL Fetch
 
-When `<read>` targets an `http://` or `https://` URL, this plugin intercepts at priority 5 (before the core file reader at 10), fetches the page with headless Chromium, extracts readable content via Mozilla Readability, and converts it to markdown via Turndown.
+When `<get>` targets an `http://` or `https://` URL, this plugin intercepts at priority 5 (before the core get handler at 10), fetches the page with headless Chromium, extracts readable content via Mozilla Readability, and converts it to markdown via Turndown.
 
 ```xml
-<read>https://docs.example.com/api</read>
+<get>https://docs.example.com/api</read>
 ```
 
 - Content is stored as a `full` entry with `title`, `excerpt`, `byline`, and `siteName` attributes.

@@ -5,7 +5,7 @@ Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
 * Optional \`results\` attribute limits the number of results (default: 12)
 * Results appear in context next turn.
-* Use \`<read>\` on a URL from results to fetch full content as markdown.`;
+* Use \`<get>\` on a URL from results to fetch full content as markdown.`;
 
 export default class WebPlugin {
 	static register(hooks) {
@@ -60,7 +60,7 @@ export default class WebPlugin {
 		});
 
 		hooks.tools.onHandle(
-			"read",
+			"get",
 			async (entry, rummy) => {
 				const attrs = entry.attributes || {};
 				const target = attrs.path;

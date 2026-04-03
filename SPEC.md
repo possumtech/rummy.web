@@ -86,11 +86,11 @@ Same operations available to the model via XML tags:
 
 ```javascript
 await rummy.set({ path, body, state, attributes })
-await rummy.read(path)
+await rummy.get(path)
 await rummy.store(path)
-await rummy.delete(path)
-await rummy.move(from, to)
-await rummy.copy(from, to)
+await rummy.rm(path)
+await rummy.mv(from, to)
+await rummy.cp(from, to)
 ```
 
 ### Plugin-Only Methods
@@ -193,9 +193,9 @@ Pass-through: body is the markdown content itself.
 3. For each result, clean the URL and create an `https://` entry at `summary` state with `title + snippet` body and `{ query, engine }` attributes.
 4. Update the `search://` result entry to `info` state with the URL listing.
 
-### Handler: `read` (priority 5)
+### Handler: `get` (priority 5)
 
-Priority 5 runs before the core file reader at priority 10.
+Priority 5 runs before the core get handler at priority 10.
 
 1. Check `attrs.path` matches `/^https?:\/\//`. If not, return (pass to next handler).
 2. Check if the URL already exists in the store (deduplication). If found, return.
@@ -211,13 +211,13 @@ Injects `SEARCH_DOCS` and `FETCH_DOCS` into the `instructions://system` entry's 
 ## Handler Priority Chain
 
 ```
-Dispatch "read" for https://example.com
+Dispatch "get" for https://example.com
   Priority 5:  WebPlugin — detects URL, fetches, upserts markdown
-  Priority 10: Core read — skipped (WebPlugin already handled)
+  Priority 10: Core get — skipped (WebPlugin already handled)
 
-Dispatch "read" for src/app.js
+Dispatch "get" for src/app.js
   Priority 5:  WebPlugin — not a URL, returns (implicit continue)
-  Priority 10: Core read — promotes file entry to full
+  Priority 10: Core get — promotes file entry to full
 ```
 
 Handler return semantics:
@@ -242,7 +242,7 @@ Model emits <search>query</search>
 ### RPC Path
 
 ```
-Client sends { method: "read", path: "https://example.com", run: "myrun" }
+Client sends { method: "get", path: "https://example.com", run: "myrun" }
   → buildRunContext(hooks, ctx, "myrun")
   → dispatchTool(hooks, rummy, "get", path, "", { path })
     → hooks.tools.dispatch("get", entry, rummy)
@@ -315,7 +315,7 @@ Uses global `fetch` with `AbortSignal.timeout(FETCH_TIMEOUT)`.
 How web entries reach the model:
 
 1. `TurnExecutor.execute()` writes `instructions://system` with empty `toolDescriptions: []`.
-2. `hooks.processTurn(rummy)` fires. WebPlugin's onTurn hook (priority 15) pushes `SEARCH_DOCS` and `FETCH_DOCS` into `toolDescriptions`.
+2. `hooks.processTurn(rummy)` fires. The framework collects `docs` from all registered tools into `toolDescriptions`.
 3. `InstructionsPlugin.project()` renders `prompt.md` with interpolated tool descriptions.
 4. `v_model_context` VIEW selects visible entries. Web entries categorize as:
    - `file` (http/https at full or summary state)
@@ -331,7 +331,7 @@ Fetched pages use `http://` and `https://` schemes in the same K/V store as file
 
 ### Priority 5 for URL interception
 
-The read handler registers at priority 5, before core file read at 10. URL detection is scheme-specific and non-contentious. Early exit prevents unnecessary filesystem operations. The core handler remains unaware of web URLs.
+The get handler registers at priority 5, before the core get handler at 10. URL detection is scheme-specific and non-contentious. Early exit prevents unnecessary filesystem operations. The core handler remains unaware of web URLs.
 
 ### Search results as separate entries
 
@@ -340,10 +340,6 @@ Each search creates one `search://` metadata entry plus individual `http(s)://` 
 ### Lazy browser initialization
 
 Playwright browser launches on first fetch, not at plugin registration. Most agent sessions never use web tools, so this avoids ~2s startup overhead. The singleton pattern with async coordination (`#launching` promise) prevents concurrent launches.
-
-### onTurn for doc injection
-
-Tool documentation is injected into `instructions://system.toolDescriptions` during the onTurn hook (priority 15), not at registration time. This allows conditional injection, deduplication across turns, and runs after the file scanner but before core materialization.
 
 ### Attributes for metadata, body for content
 
