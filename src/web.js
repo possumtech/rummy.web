@@ -7,10 +7,6 @@ Example: <search results="5">SQLite WAL mode</search> (limit results)
 * Results appear in context next turn.
 * Use \`<read>\` on a URL from results to fetch full content as markdown.`;
 
-const FETCH_DOCS = `## <read>[url]</read> - Fetch a web page
-Example: <read>https://docs.example.com/api</read>
-* Content is extracted, cleaned, and stored as markdown.`;
-
 export default class WebPlugin {
 	static register(hooks) {
 		hooks.tools.register("search", {
@@ -100,23 +96,5 @@ export default class WebPlugin {
 			},
 			5,
 		);
-
-		hooks.onTurn(async (rummy) => {
-			const { entries: store, runId } = rummy;
-			const attrs = await store.getAttributes(runId, "instructions://system");
-			if (!attrs) return;
-			const descs = attrs.toolDescriptions || [];
-			if (descs.some((d) => d.includes("search"))) return;
-			descs.push(SEARCH_DOCS);
-			descs.push(FETCH_DOCS);
-			await store.upsert(
-				runId,
-				rummy.sequence,
-				"instructions://system",
-				await store.getBody(runId, "instructions://system"),
-				"info",
-				{ attributes: { ...attrs, toolDescriptions: descs } },
-			);
-		}, 15);
 	}
 }
