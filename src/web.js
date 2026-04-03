@@ -45,7 +45,7 @@ export default class WebPlugin {
 			for (const r of results) {
 				const url = WebFetcher.cleanUrl(r.url);
 				urls.push(url);
-				await rummy.write({
+				await rummy.set({
 					path: url,
 					body: `${r.title}\n${r.snippet}`,
 					state: "summary",

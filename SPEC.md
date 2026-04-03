@@ -85,7 +85,7 @@ Passed to all handlers and turn processors. Provides unified access to the curre
 Same operations available to the model via XML tags:
 
 ```javascript
-await rummy.write({ path, body, state, attributes })
+await rummy.set({ path, body, state, attributes })
 await rummy.read(path)
 await rummy.store(path)
 await rummy.delete(path)

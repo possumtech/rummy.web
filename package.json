@@ -1,6 +1,6 @@
 {
-	"name": "@possumtech/rummy-web",
-	"version": "0.0.1",
+	"name": "@possumtech/rummy.web",
+	"version": "0.0.2",
 	"description": "Web search and fetch plugin for rummy — Playwright browser automation and SearXNG search integration",
 	"keywords": [
 		"rummy",
@@ -34,6 +34,9 @@
 	"files": [
 		"src"
 	],
+	"publishConfig": {
+		"access": "public"
+	},
 	"scripts": {
 		"lint": "biome check src --fix --unsafe",
 		"test": "npm run lint && npm run test:unit",
