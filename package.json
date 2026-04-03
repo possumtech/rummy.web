@@ -1,0 +1,51 @@
+{
+	"name": "@possumtech/rummy-web",
+	"version": "0.0.1",
+	"description": "Web search and fetch plugin for rummy — Playwright browser automation and SearXNG search integration",
+	"keywords": [
+		"rummy",
+		"plugin",
+		"playwright",
+		"searxng",
+		"web",
+		"search",
+		"fetch"
+	],
+	"homepage": "https://github.com/possumtech/rummy.web#readme",
+	"bugs": {
+		"url": "https://github.com/possumtech/rummy.web/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/possumtech/rummy.web.git"
+	},
+	"license": "MIT",
+	"author": "@wikitopian",
+	"engines": {
+		"node": ">=25",
+		"npm": ">=11"
+	},
+	"type": "module",
+	"exports": {
+		".": "./src/web.js",
+		"./fetcher": "./src/WebFetcher.js"
+	},
+	"main": "src/web.js",
+	"files": [
+		"src"
+	],
+	"scripts": {
+		"lint": "biome check src --fix --unsafe",
+		"test": "npm run lint && npm run test:unit",
+		"test:unit": "node --test $(find src -name '*.test.js')"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.6"
+	},
+	"dependencies": {
+		"@mozilla/readability": "^0.6.0",
+		"jsdom": "^29.0.1",
+		"playwright": "^1.58.2",
+		"turndown": "^7.2.2"
+	}
+}
