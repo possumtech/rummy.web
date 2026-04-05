@@ -1,84 +1,89 @@
-# @possumtech/rummy-web — Specification
+# @possumtech/rummy.web — Specification
 
 Architectural specification for the rummy web plugin. Covers the plugin contract, entry lifecycle, handler dispatch, and design rationale.
 
-## Plugin Contract
+## Plugin Contract (v0.2)
 
-All rummy plugins export a class with a static `register(hooks)` method:
+Plugins export a class whose constructor receives a `PluginContext`:
 
 ```javascript
-export default class WebPlugin {
-    static register(hooks) { }
+export default class RummyWeb {
+    #core;
+
+    constructor(core) {
+        this.#core = core;
+        // Register handlers, views, filters via core
+    }
 }
 ```
 
-The plugin loader (`registerPlugins`) scans directories for `.js` files, imports them, and calls `Plugin.register(hooks)` if present. Built-in plugins load first (`src/plugins/`), then user plugins (`~/.rummy/plugins/`). Within a directory, files matching the directory name (e.g. `web/web.js`) or root-level `.js` files (excluding `index.js`) are loaded. Test files (`*.test.js`) are skipped.
+The plugin loader scans directories for `.js` files, imports the default export, and instantiates with `new Plugin(core)`. The plugin name is derived from the filename (`web.js` → `"web"`). Built-in plugins load first (`src/plugins/`), then user plugins (`~/.rummy/plugins/`). Test files (`*.test.js`) are skipped.
 
-## Hook System
+Plugins that still export a `static register(hooks)` method are supported for backward compatibility.
 
-The `hooks` object provides the full registration API.
+## PluginContext API
 
-### Tool Registration
-
-```javascript
-hooks.tools.register(name, {
-    modes: new Set(["ask", "act"]),  // Which agent modes allow this tool
-    category: "ask",                  // "ask" (read-only) or "act" (mutating)
-    docs: "markdown string",          // Injected into system prompt
-    project: (entry) => string,       // Projection: transforms entry for model view
-    handler: async (entry, rummy) => {} // Optional inline handler
-});
-```
-
-### Handler Registration
-
-Handlers execute in priority order (lower = earlier). Return `false` to stop the chain.
-
-```javascript
-hooks.tools.onHandle(scheme, async (entry, rummy) => {
-    // entry: { scheme, path, body, attributes, state, resultPath }
-    // rummy: RummyContext
-    // Return false to stop chain; implicit return continues
-}, priority);
-```
-
-### Projection Registration
-
-Projections transform an entry's body into what the model sees:
-
-```javascript
-hooks.tools.onProject(scheme, (entry) => transformedBody);
-```
-
-### Turn Processors
-
-Run before materialization each turn:
-
-```javascript
-hooks.onTurn(async (rummy) => { }, priority);
-```
-
-### Events and Filters
-
-Events: `hooks.entry.created`, `hooks.run.started`, `hooks.ask.completed`, etc.
-Filters: `hooks.llm.messages`, `hooks.llm.response`, `hooks.rpc.request`, etc.
-
-## RummyContext API
-
-Passed to all handlers and turn processors. Provides unified access to the current turn.
+The `core` object passed to the constructor:
 
 ### Properties
 
 | Property | Type | Description |
 |---|---|---|
-| `hooks` | Hooks | Full hook system reference |
-| `db` | Database | SQLRite prepared statement collection |
-| `entries` | KnownStore | K/V store API |
-| `project` | Object | Current project metadata |
-| `type` | String | Turn mode: `"ask"` or `"act"` |
-| `sequence` | Number | Current turn number |
-| `runId` | Number | Current run ID |
-| `contextSize` | Number | Token budget |
+| `core.name` | String | Plugin name as derived by the loader |
+| `core.hooks` | Hooks | Full hook system (for cross-scheme registration) |
+| `core.db` | Database | SQLRite prepared statements (available after DB init) |
+| `core.entries` | KnownStore | K/V store API (available after DB init) |
+
+### `core.on(event, callback, priority)`
+
+Registers a named callback scoped to the plugin's own tool name:
+
+| Event | Resolves to |
+|---|---|
+| `"handler"` | `hooks.tools.onHandle(core.name, callback, priority)` |
+| `"full"` | `hooks.tools.onView(core.name, callback, "full")` |
+| `"summary"` | `hooks.tools.onView(core.name, callback, "summary")` |
+| Any other | Walks `hooks` by dot-path (e.g. `"entry.changed"` → `hooks.entry.changed.on(fn)`) |
+
+### `core.filter(name, callback, priority)`
+
+Registers a filter callback. Walks `hooks` by dot-path to find the filter.
+
+| Filter | Purpose |
+|---|---|
+| `"instructions.toolDocs"` | Append tool documentation to system prompt |
+| `"llm.response"` | Transform LLM response |
+| `"assembly.system"` | Add sections to system message |
+| `"assembly.user"` | Add sections to user message |
+
+### Cross-Scheme Registration
+
+`core.on("handler")` and `core.on("full")` register against `core.name`. To register handlers or views on other schemes, use `core.hooks` directly:
+
+```javascript
+core.hooks.tools.ensureTool("search");
+core.hooks.tools.onHandle("search", handler);
+core.hooks.tools.onView("search", viewFn, "full");
+core.hooks.tools.onView("http", viewFn);
+core.hooks.tools.onHandle("get", handler, 5);
+```
+
+## RummyContext API
+
+Passed to all handlers as the second argument. Provides unified access to the current turn.
+
+### Properties
+
+| Property | Type | Description |
+|---|---|---|
+| `rummy.hooks` | Hooks | Full hook system reference |
+| `rummy.db` | Database | SQLRite prepared statement collection |
+| `rummy.entries` | KnownStore | K/V store API |
+| `rummy.project` | Object | Current project metadata |
+| `rummy.type` | String | Turn mode: `"ask"` or `"act"` |
+| `rummy.sequence` | Number | Current turn number |
+| `rummy.runId` | Number | Current run ID |
+| `rummy.contextSize` | Number | Token budget |
 
 ### Tool Methods
 
@@ -145,7 +150,7 @@ State transitions are enforced by database triggers against the `valid_states` c
 
 ### Entry Attributes
 
-Metadata stored as JSON in `entry.attributes`, invisible to the model unless a projection function surfaces it:
+Metadata stored as JSON in `entry.attributes`, invisible to the model unless a view function surfaces it:
 
 **Search result entries** (`https://` at `summary`):
 ```json
@@ -162,29 +167,53 @@ Metadata stored as JSON in `entry.attributes`, invisible to the model unless a p
 }
 ```
 
-## WebPlugin Registration
+## RummyWeb Registration
+
+### Constructor
+
+```javascript
+constructor(core) {
+    const { hooks } = core;
+
+    hooks.tools.ensureTool("search");
+    hooks.tools.onHandle("search", this.#handleSearch.bind(this));
+    hooks.tools.onView("search", this.#viewSearch.bind(this), "full");
+
+    hooks.tools.onView("http", (entry) => entry.body);
+    hooks.tools.onView("https", (entry) => entry.body);
+
+    hooks.tools.onHandle("get", this.#handleGet.bind(this), 5);
+
+    core.filter("instructions.toolDocs", (content) =>
+        content ? `${content}\n\n${SEARCH_DOCS}` : SEARCH_DOCS,
+    );
+}
+```
+
+All registration happens in the constructor via `core.hooks` (cross-scheme) and `core.filter` (doc injection).
 
 ### Tool: `search`
 
-```javascript
-hooks.tools.register("search", {
-    modes: new Set(["ask", "act"]),
-    category: "ask",
-    docs: SEARCH_DOCS,
-    project: (entry) => `# search "${attrs.path || ""}"\n${entry.body}`
-});
-```
+Registered via `hooks.tools.ensureTool("search")` with a handler, view, and doc filter.
 
-Available in both `ask` and `act` modes. Categorized as `ask` (non-mutating).
-
-### Projections: `http` and `https`
+### Views: `http` and `https`
 
 ```javascript
-hooks.tools.onProject("http", (entry) => entry.body);
-hooks.tools.onProject("https", (entry) => entry.body);
+hooks.tools.onView("http", (entry) => entry.body);
+hooks.tools.onView("https", (entry) => entry.body);
 ```
 
 Pass-through: body is the markdown content itself.
+
+### Doc Injection
+
+```javascript
+core.filter("instructions.toolDocs", (content) =>
+    content ? `${content}\n\n${SEARCH_DOCS}` : SEARCH_DOCS,
+);
+```
+
+The framework calls `instructions.toolDocs` filters during materialization. No `onTurn` hook needed.
 
 ### Handler: `search` (default priority)
 
@@ -204,19 +233,15 @@ Priority 5 runs before the core get handler at priority 10.
 5. On error: log warning, return (don't stop chain).
 6. On success: upsert at `full` state with markdown body and `{ title, excerpt, byline, siteName }` attributes.
 
-### Turn Hook (priority 15)
-
-Injects `SEARCH_DOCS` and `FETCH_DOCS` into the `instructions://system` entry's `toolDescriptions` attribute array. Runs before materialization. Includes deduplication check to prevent double-injection across turns.
-
 ## Handler Priority Chain
 
 ```
 Dispatch "get" for https://example.com
-  Priority 5:  WebPlugin — detects URL, fetches, upserts markdown
-  Priority 10: Core get — skipped (WebPlugin already handled)
+  Priority 5:  RummyWeb — detects URL, fetches, upserts markdown
+  Priority 10: Core get — skipped (RummyWeb already handled)
 
 Dispatch "get" for src/app.js
-  Priority 5:  WebPlugin — not a URL, returns (implicit continue)
+  Priority 5:  RummyWeb — not a URL, returns (implicit continue)
   Priority 10: Core get — promotes file entry to full
 ```
 
@@ -233,7 +258,7 @@ Model emits <search>query</search>
   → XmlParser produces { name: "search", path: "query" }
   → TurnExecutor records search:// entry at "full"
   → hooks.tools.dispatch("search", entry, rummy)
-    → WebPlugin search handler fires
+    → RummyWeb#handleSearch fires
     → Creates https:// entries at "summary"
     → Updates search:// entry to "info" with listing
   → hooks.entry.created.emit(entry)
@@ -246,7 +271,7 @@ Client sends { method: "get", path: "https://example.com", run: "myrun" }
   → buildRunContext(hooks, ctx, "myrun")
   → dispatchTool(hooks, rummy, "get", path, "", { path })
     → hooks.tools.dispatch("get", entry, rummy)
-      → Priority 5: WebPlugin detects URL, fetches, upserts
+      → Priority 5: RummyWeb#handleGet detects URL, fetches, upserts
       → Priority 10: Core handler (skipped)
   → RPC response: { status: "ok" }
 ```
@@ -314,9 +339,9 @@ Uses global `fetch` with `AbortSignal.timeout(FETCH_TIMEOUT)`.
 
 How web entries reach the model:
 
-1. `TurnExecutor.execute()` writes `instructions://system` with empty `toolDescriptions: []`.
-2. `hooks.processTurn(rummy)` fires. The framework collects `docs` from all registered tools into `toolDescriptions`.
-3. `InstructionsPlugin.project()` renders `prompt.md` with interpolated tool descriptions.
+1. `TurnExecutor.execute()` writes `instructions://system`.
+2. The framework runs `instructions.toolDocs` filters. RummyWeb's filter appends `SEARCH_DOCS`.
+3. `InstructionsPlugin` renders the system prompt with interpolated tool descriptions.
 4. `v_model_context` VIEW selects visible entries. Web entries categorize as:
    - `file` (http/https at full or summary state)
    - `file_index` (http/https at stored state)
@@ -339,11 +364,15 @@ Each search creates one `search://` metadata entry plus individual `http(s)://` 
 
 ### Lazy browser initialization
 
-Playwright browser launches on first fetch, not at plugin registration. Most agent sessions never use web tools, so this avoids ~2s startup overhead. The singleton pattern with async coordination (`#launching` promise) prevents concurrent launches.
+Playwright browser launches on first fetch, not at plugin construction. Most agent sessions never use web tools, so this avoids ~2s startup overhead. The singleton pattern with async coordination (`#launching` promise) prevents concurrent launches.
 
 ### Attributes for metadata, body for content
 
-Fetch metadata (`title`, `byline`, `excerpt`, `siteName`) lives in `entry.attributes`; the body is pure markdown content. Attributes are invisible to the model unless a projection function surfaces them, keeping the content clean.
+Fetch metadata (`title`, `byline`, `excerpt`, `siteName`) lives in `entry.attributes`; the body is pure markdown content. Attributes are invisible to the model unless a view function surfaces them, keeping the content clean.
+
+### Cross-scheme registration via core.hooks
+
+This plugin registers handlers and views on schemes it doesn't own (`search`, `get`, `http`, `https`). The `core.on()` shorthand scopes to `core.name` (which is `"web"`), so cross-scheme work goes through `core.hooks.tools` directly. This is the intended pattern for plugins that extend existing tools.
 
 ## Timeout Cascade
 
@@ -359,7 +388,7 @@ Both page loads and SearXNG requests share the same timeout value.
 
 ```
 src/
-├── web.js              — WebPlugin class (plugin entry point)
+├── web.js              — RummyWeb class (plugin entry point)
 ├── WebFetcher.js       — Playwright fetch + SearXNG search
 └── WebFetcher.test.js  — Unit tests (cleanUrl)
 ```

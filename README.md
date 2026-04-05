@@ -1,11 +1,11 @@
-# @possumtech/rummy-web
+# @possumtech/rummy.web
 
 Web search and fetch plugin for [rummy](https://github.com/possumtech/rummy). Adds `<search>` and URL-aware `<get>` tools powered by Playwright, Mozilla Readability, and SearXNG.
 
 ## Install
 
 ```sh
-npm install @possumtech/rummy-web
+npm install @possumtech/rummy.web
 npx playwright install chromium
 ```
 
@@ -18,10 +18,10 @@ Create a one-line re-export in your rummy plugins directory:
 ```
 
 ```javascript
-export { default } from "@possumtech/rummy-web";
+export { default } from "@possumtech/rummy.web";
 ```
 
-Rummy's plugin loader discovers the file and calls `WebPlugin.register(hooks)` automatically on startup.
+The plugin loader discovers the file, derives the name `"web"` from the filename, and calls `new RummyWeb(core)` with a `PluginContext`.
 
 ### SearXNG
 
@@ -59,7 +59,7 @@ Queries SearXNG and creates URL entries from results.
 When `<get>` targets an `http://` or `https://` URL, this plugin intercepts at priority 5 (before the core get handler at 10), fetches the page with headless Chromium, extracts readable content via Mozilla Readability, and converts it to markdown via Turndown.
 
 ```xml
-<get>https://docs.example.com/api</read>
+<get>https://docs.example.com/api</get>
 ```
 
 - Content is stored as a `full` entry with `title`, `excerpt`, `byline`, and `siteName` attributes.
@@ -71,7 +71,7 @@ When `<get>` targets an `http://` or `https://` URL, this plugin intercepts at p
 `WebFetcher` is available as a standalone export for use outside the plugin system:
 
 ```javascript
-import WebFetcher from "@possumtech/rummy-web/fetcher";
+import WebFetcher from "@possumtech/rummy.web/fetcher";
 
 const fetcher = new WebFetcher();
 
