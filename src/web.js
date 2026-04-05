@@ -21,7 +21,9 @@ export default class RummyWeb {
 		hooks.tools.onView("search", this.#viewSearch.bind(this), "full");
 
 		hooks.tools.onView("http", (entry) => entry.body);
+		hooks.tools.onView("http", this.#summaryUrl, "summary");
 		hooks.tools.onView("https", (entry) => entry.body);
+		hooks.tools.onView("https", this.#summaryUrl, "summary");
 
 		hooks.tools.onHandle("get", this.#handleGet.bind(this), 5);
 
@@ -56,13 +58,11 @@ export default class RummyWeb {
 		}
 
 		const listing = urls.join("\n");
-		await rummy.entries.upsert(
-			rummy.runId,
-			rummy.sequence,
-			entry.resultPath,
-			`${results.length} results for "${query}"\n${listing}`,
-			"info",
-		);
+		await rummy.set({
+			path: entry.resultPath,
+			body: `${results.length} results for "${query}"\n${listing}`,
+			state: "info",
+		});
 	}
 
 	async #handleGet(entry, rummy) {
@@ -70,8 +70,7 @@ export default class RummyWeb {
 		const target = attrs.path;
 		if (!target || !/^https?:\/\//.test(target)) return;
 
-		const { entries: store, sequence: turn, runId } = rummy;
-		const existing = await store.getBody(runId, target);
+		const existing = await rummy.getBody(target);
 		if (existing !== null) return;
 
 		const clean = WebFetcher.cleanUrl(target);
@@ -82,21 +81,27 @@ export default class RummyWeb {
 		}
 
 		const header = fetched.title ? `# ${fetched.title}\n\n` : "";
-		await store.upsert(
-			runId,
-			turn,
-			clean,
-			header + (fetched.content || ""),
-			"full",
-			{
-				attributes: {
-					title: fetched.title,
-					excerpt: fetched.excerpt,
-					byline: fetched.byline,
-					siteName: fetched.siteName,
-				},
+		await rummy.set({
+			path: clean,
+			body: header + (fetched.content || ""),
+			state: "full",
+			attributes: {
+				title: fetched.title,
+				excerpt: fetched.excerpt,
+				byline: fetched.byline,
+				siteName: fetched.siteName,
 			},
-		);
+		});
+	}
+
+	#summaryUrl(entry) {
+		const { title, excerpt, byline, siteName } = entry.attributes || {};
+		const lines = [];
+		if (title) lines.push(`## ${title}`);
+		if (siteName || byline)
+			lines.push([siteName, byline].filter(Boolean).join(" — "));
+		if (excerpt) lines.push(excerpt);
+		return lines.join("\n");
 	}
 
 	#viewSearch(entry) {

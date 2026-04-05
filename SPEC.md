@@ -2,7 +2,7 @@
 
 Architectural specification for the rummy web plugin. Covers the plugin contract, entry lifecycle, handler dispatch, and design rationale.
 
-## Plugin Contract (v0.2)
+## Plugin Contract
 
 Plugins export a class whose constructor receives a `PluginContext`:
 
@@ -17,13 +17,42 @@ export default class RummyWeb {
 }
 ```
 
-The plugin loader scans directories for `.js` files, imports the default export, and instantiates with `new Plugin(core)`. The plugin name is derived from the filename (`web.js` → `"web"`). Built-in plugins load first (`src/plugins/`), then user plugins (`~/.rummy/plugins/`). Test files (`*.test.js`) are skipped.
+External plugins load via `RUMMY_PLUGIN_*` env vars:
+
+```env
+RUMMY_PLUGIN_WEB=@possumtech/rummy.web
+```
+
+The plugin loader imports the default export and instantiates with `new Plugin(core)`. The plugin name is derived from the env var key (`RUMMY_PLUGIN_WEB` → `"web"`). Graceful failure if not installed.
 
 Plugins that still export a `static register(hooks)` method are supported for backward compatibility.
 
 ## PluginContext API
 
-The `core` object passed to the constructor:
+The `core` object passed to the constructor.
+
+### Registration: `core.on(event, callback, priority?)`
+
+| Event | Purpose |
+|---|---|
+| `"handler"` | Tool handler — scoped to `core.name` |
+| `"full"` | Full projection — scoped to `core.name` |
+| `"summary"` | Summary projection — scoped to `core.name` |
+| `"turn"` | Turn processor — runs before context materialization |
+| `"entry.created"` | Entry created during dispatch |
+| `"entry.changed"` | File entries changed on disk |
+| Any `"dotted.name"` | Resolves to the matching hook in the hook tree |
+
+### Registration: `core.filter(name, callback, priority?)`
+
+| Filter | Purpose |
+|---|---|
+| `"instructions.toolDocs"` | Append tool documentation to system prompt |
+| `"assembly.system"` | Contribute to system message |
+| `"assembly.user"` | Contribute to user message |
+| `"llm.messages"` | Transform final messages before LLM call |
+| `"llm.response"` | Transform LLM response |
+| Any `"dotted.name"` | Resolves to the matching filter in the hook tree |
 
 ### Properties
 
@@ -33,28 +62,6 @@ The `core` object passed to the constructor:
 | `core.hooks` | Hooks | Full hook system (for cross-scheme registration) |
 | `core.db` | Database | SQLRite prepared statements (available after DB init) |
 | `core.entries` | KnownStore | K/V store API (available after DB init) |
-
-### `core.on(event, callback, priority)`
-
-Registers a named callback scoped to the plugin's own tool name:
-
-| Event | Resolves to |
-|---|---|
-| `"handler"` | `hooks.tools.onHandle(core.name, callback, priority)` |
-| `"full"` | `hooks.tools.onView(core.name, callback, "full")` |
-| `"summary"` | `hooks.tools.onView(core.name, callback, "summary")` |
-| Any other | Walks `hooks` by dot-path (e.g. `"entry.changed"` → `hooks.entry.changed.on(fn)`) |
-
-### `core.filter(name, callback, priority)`
-
-Registers a filter callback. Walks `hooks` by dot-path to find the filter.
-
-| Filter | Purpose |
-|---|---|
-| `"instructions.toolDocs"` | Append tool documentation to system prompt |
-| `"llm.response"` | Transform LLM response |
-| `"assembly.system"` | Add sections to system message |
-| `"assembly.user"` | Add sections to user message |
 
 ### Cross-Scheme Registration
 
@@ -68,59 +75,46 @@ core.hooks.tools.onView("http", viewFn);
 core.hooks.tools.onHandle("get", handler, 5);
 ```
 
+This is the established pattern for plugins that extend tools they don't own (see `file.js` in core).
+
 ## RummyContext API
 
-Passed to all handlers as the second argument. Provides unified access to the current turn.
+Passed to handlers as the second argument. Per-turn scope.
+
+### Tool Verbs
+
+| Method | Effect |
+|---|---|
+| `rummy.set({ path, body, state, attributes })` | Create/update entry |
+| `rummy.get(path)` | Promote to full state |
+| `rummy.store(path)` | Demote to stored state |
+| `rummy.rm(path)` | Delete permanently |
+| `rummy.mv(from, to)` | Move entry |
+| `rummy.cp(from, to)` | Copy entry |
+
+### Query Methods
+
+| Method | Returns |
+|---|---|
+| `rummy.getEntry(path)` | Full entry object |
+| `rummy.getBody(path)` | Body text or null |
+| `rummy.getState(path)` | State string or null |
+| `rummy.getAttributes(path)` | Parsed attributes `{}` |
+| `rummy.getEntries(pattern, body?)` | Array of matching entries |
 
 ### Properties
 
 | Property | Type | Description |
 |---|---|---|
-| `rummy.hooks` | Hooks | Full hook system reference |
-| `rummy.db` | Database | SQLRite prepared statement collection |
-| `rummy.entries` | KnownStore | K/V store API |
-| `rummy.project` | Object | Current project metadata |
-| `rummy.type` | String | Turn mode: `"ask"` or `"act"` |
-| `rummy.sequence` | Number | Current turn number |
+| `rummy.entries` | KnownStore | Direct store access |
+| `rummy.db` | Database | SQLRite prepared statements |
 | `rummy.runId` | Number | Current run ID |
-| `rummy.contextSize` | Number | Token budget |
+| `rummy.projectId` | Number | Current project ID |
+| `rummy.sequence` | Number | Current turn number |
 
-### Tool Methods
+### Direct Store Access
 
-Same operations available to the model via XML tags:
-
-```javascript
-await rummy.set({ path, body, state, attributes })
-await rummy.get(path)
-await rummy.store(path)
-await rummy.rm(path)
-await rummy.mv(from, to)
-await rummy.cp(from, to)
-```
-
-### Plugin-Only Methods
-
-```javascript
-rummy.entries                       // Direct KnownStore access
-rummy.getAttributes(path)           // Read entry attributes JSON
-rummy.getEntries(pattern, body?)    // Pattern query
-rummy.log(message)                  // Audit log
-```
-
-## KnownStore API
-
-The entry store used by `rummy.entries`:
-
-```javascript
-await store.upsert(runId, turn, path, body, state, { attributes, hash })
-await store.getBody(runId, path)
-await store.getAttributes(runId, path)
-await store.getEntriesByPattern(runId, pattern, body?, { limit, offset })
-await store.slugPath(runId, scheme, content)
-await store.promote(runId, path, turn)
-await store.demote(runId, path)
-await store.remove(runId, path)
-```
+Handlers may use `rummy.entries` (KnownStore) directly for operations not covered by the verb/query API, such as `upsert` with explicit `runId` and `turn`. This is the established pattern used by core plugins.
 
 ## Entry System
 
@@ -190,37 +184,14 @@ constructor(core) {
 }
 ```
 
-All registration happens in the constructor via `core.hooks` (cross-scheme) and `core.filter` (doc injection).
-
-### Tool: `search`
-
-Registered via `hooks.tools.ensureTool("search")` with a handler, view, and doc filter.
-
-### Views: `http` and `https`
-
-```javascript
-hooks.tools.onView("http", (entry) => entry.body);
-hooks.tools.onView("https", (entry) => entry.body);
-```
-
-Pass-through: body is the markdown content itself.
-
-### Doc Injection
-
-```javascript
-core.filter("instructions.toolDocs", (content) =>
-    content ? `${content}\n\n${SEARCH_DOCS}` : SEARCH_DOCS,
-);
-```
-
-The framework calls `instructions.toolDocs` filters during materialization. No `onTurn` hook needed.
+All registration is cross-scheme (this plugin's `core.name` is `"web"`, but it registers on `search`, `get`, `http`, and `https`), so it goes through `core.hooks` directly. Doc injection uses `core.filter("instructions.toolDocs")`, the established pattern used by all core plugins.
 
 ### Handler: `search` (default priority)
 
 1. Extract query from `attrs.path` or `entry.body`.
 2. Query SearXNG via `WebFetcher.search(query, { limit })`.
-3. For each result, clean the URL and create an `https://` entry at `summary` state with `title + snippet` body and `{ query, engine }` attributes.
-4. Update the `search://` result entry to `info` state with the URL listing.
+3. For each result, clean the URL and call `rummy.set()` to create an `https://` entry at `summary` state with `title + snippet` body and `{ query, engine }` attributes.
+4. Upsert the result entry at `info` state with the URL listing.
 
 ### Handler: `get` (priority 5)
 
@@ -233,16 +204,34 @@ Priority 5 runs before the core get handler at priority 10.
 5. On error: log warning, return (don't stop chain).
 6. On success: upsert at `full` state with markdown body and `{ title, excerpt, byline, siteName }` attributes.
 
+### View: `search` (full fidelity)
+
+```javascript
+`# search "${attrs.path || ""}"\n${entry.body}`
+```
+
+### Views: `http` and `https`
+
+Pass-through: `(entry) => entry.body`. The body is the markdown content itself.
+
+### Doc Injection
+
+```javascript
+core.filter("instructions.toolDocs", (content) =>
+    content ? `${content}\n\n${SEARCH_DOCS}` : SEARCH_DOCS,
+);
+```
+
 ## Handler Priority Chain
 
 ```
 Dispatch "get" for https://example.com
-  Priority 5:  RummyWeb — detects URL, fetches, upserts markdown
-  Priority 10: Core get — skipped (RummyWeb already handled)
+  Priority 5:  RummyWeb#handleGet — detects URL, fetches, upserts markdown
+  Priority 10: Core Get#handler — skipped (already handled)
 
 Dispatch "get" for src/app.js
-  Priority 5:  RummyWeb — not a URL, returns (implicit continue)
-  Priority 10: Core get — promotes file entry to full
+  Priority 5:  RummyWeb#handleGet — not a URL, returns (implicit continue)
+  Priority 10: Core Get#handler — promotes file entry to full
 ```
 
 Handler return semantics:
@@ -259,8 +248,8 @@ Model emits <search>query</search>
   → TurnExecutor records search:// entry at "full"
   → hooks.tools.dispatch("search", entry, rummy)
     → RummyWeb#handleSearch fires
-    → Creates https:// entries at "summary"
-    → Updates search:// entry to "info" with listing
+    → Creates https:// entries at "summary" via rummy.set()
+    → Updates search:// result entry to "info"
   → hooks.entry.created.emit(entry)
 ```
 
@@ -276,7 +265,7 @@ Client sends { method: "get", path: "https://example.com", run: "myrun" }
   → RPC response: { status: "ok" }
 ```
 
-Both paths use the same dispatch chain. RPC clients bypass mode enforcement but share the handler pipeline.
+Both paths use the same dispatch chain.
 
 ## WebFetcher Architecture
 
@@ -320,7 +309,7 @@ Uses global `fetch` with `AbortSignal.timeout(FETCH_TIMEOUT)`.
 
 ### URL Cleaning
 
-`WebFetcher.cleanUrl(raw)` strips query params, hash fragments, and trailing slashes. This serves two purposes:
+`WebFetcher.cleanUrl(raw)` strips query params, hash fragments, and trailing slashes:
 
 1. **Cache deduplication**: `?utm_source=x` and `#section` are transient; same content shouldn't be fetched twice.
 2. **Path canonicalization**: entries keyed by clean URL are reliably addressable.
@@ -339,24 +328,24 @@ Uses global `fetch` with `AbortSignal.timeout(FETCH_TIMEOUT)`.
 
 How web entries reach the model:
 
-1. `TurnExecutor.execute()` writes `instructions://system`.
-2. The framework runs `instructions.toolDocs` filters. RummyWeb's filter appends `SEARCH_DOCS`.
+1. `TurnExecutor` writes `instructions://system`.
+2. `instructions.toolDocs` filters run. RummyWeb's filter appends `SEARCH_DOCS`.
 3. `InstructionsPlugin` renders the system prompt with interpolated tool descriptions.
 4. `v_model_context` VIEW selects visible entries. Web entries categorize as:
    - `file` (http/https at full or summary state)
    - `file_index` (http/https at stored state)
    - `result` (search entries)
-5. `ContextAssembler` places file-category entries in the system message context section and result-category entries in user message tool results.
+5. `ContextAssembler` places file-category entries in the system message and result-category entries in user message tool results.
 
 ## Design Decisions
 
 ### Web entries as scheme-based K/V
 
-Fetched pages use `http://` and `https://` schemes in the same K/V store as files and knowledge. This gives unified state transitions (promote/demote/store), consistent visibility rules, deduplication by path, and model transparency — URLs appear alongside files in context.
+Fetched pages use `http://` and `https://` schemes in the same K/V store as files and knowledge. Unified state transitions, consistent visibility rules, deduplication by path, and model transparency — URLs appear alongside files in context.
 
 ### Priority 5 for URL interception
 
-The get handler registers at priority 5, before the core get handler at 10. URL detection is scheme-specific and non-contentious. Early exit prevents unnecessary filesystem operations. The core handler remains unaware of web URLs.
+The get handler registers at priority 5, before the core get handler at 10. URL detection is scheme-specific and non-contentious. Early exit prevents unnecessary filesystem operations.
 
 ### Search results as separate entries
 
@@ -364,15 +353,15 @@ Each search creates one `search://` metadata entry plus individual `http(s)://` 
 
 ### Lazy browser initialization
 
-Playwright browser launches on first fetch, not at plugin construction. Most agent sessions never use web tools, so this avoids ~2s startup overhead. The singleton pattern with async coordination (`#launching` promise) prevents concurrent launches.
+Playwright browser launches on first fetch, not at plugin construction. Most agent sessions never use web tools, so this avoids ~2s startup overhead. The singleton pattern with `#launching` promise prevents concurrent launches.
 
 ### Attributes for metadata, body for content
 
-Fetch metadata (`title`, `byline`, `excerpt`, `siteName`) lives in `entry.attributes`; the body is pure markdown content. Attributes are invisible to the model unless a view function surfaces them, keeping the content clean.
+Fetch metadata (`title`, `byline`, `excerpt`, `siteName`) lives in `entry.attributes`; the body is pure markdown content. Attributes are invisible to the model unless a view function surfaces them.
 
 ### Cross-scheme registration via core.hooks
 
-This plugin registers handlers and views on schemes it doesn't own (`search`, `get`, `http`, `https`). The `core.on()` shorthand scopes to `core.name` (which is `"web"`), so cross-scheme work goes through `core.hooks.tools` directly. This is the intended pattern for plugins that extend existing tools.
+This plugin registers handlers and views on schemes it doesn't own (`search`, `get`, `http`, `https`). `core.on()` scopes to `core.name` (`"web"`), so cross-scheme work goes through `core.hooks.tools` directly — the same pattern used by the core `file` plugin.
 
 ## Timeout Cascade
 
@@ -381,8 +370,6 @@ RUMMY_FETCH_TIMEOUT (default 15000 ms)
   ├ WebFetcher.fetch()   — page.goto({ timeout: FETCH_TIMEOUT })
   └ WebFetcher.search()  — fetch({ signal: AbortSignal.timeout(FETCH_TIMEOUT) })
 ```
-
-Both page loads and SearXNG requests share the same timeout value.
 
 ## File Structure
 

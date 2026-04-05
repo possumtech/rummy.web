@@ -46,10 +46,13 @@ export default class WebFetcher {
 		const page = await context.newPage();
 
 		try {
-			await page.goto(url, {
+			const response = await page.goto(url, {
 				waitUntil: "domcontentloaded",
 				timeout: FETCH_TIMEOUT,
 			});
+			const status = response?.status() ?? 0;
+			if (status >= 400)
+				return { url, title: null, content: null, error: `HTTP ${status}` };
 			const html = await page.content();
 			const doc = new JSDOM(html, { url });
 			const article = new Readability(doc.window.document).parse();

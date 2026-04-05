@@ -11,17 +11,13 @@ npx playwright install chromium
 
 ## Setup
 
-Create a one-line re-export in your rummy plugins directory:
+Load via environment variable:
 
-```
-~/.rummy/plugins/web.js
-```
-
-```javascript
-export { default } from "@possumtech/rummy.web";
+```env
+RUMMY_PLUGIN_WEB=@possumtech/rummy.web
 ```
 
-The plugin loader discovers the file, derives the name `"web"` from the filename, and calls `new RummyWeb(core)` with a `PluginContext`.
+The plugin loader imports the package, derives the name `"web"`, and calls `new RummyWeb(core)` with a `PluginContext`. Graceful failure if not installed.
 
 ### SearXNG
 
@@ -35,6 +31,7 @@ docker run -d -p 8888:8080 searxng/searxng
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
+| `RUMMY_PLUGIN_WEB` | Yes | — | Set to `@possumtech/rummy.web` to load the plugin |
 | `RUMMY_SEARXNG_URL` | Yes (for search) | — | SearXNG base URL (e.g. `http://127.0.0.1:8888`) |
 | `RUMMY_FETCH_TIMEOUT` | No | `15000` | Timeout in ms for page loads and search requests |
 
