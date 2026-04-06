@@ -71,9 +71,6 @@ export default class RummyWeb {
 		if (!target || !/^https?:\/\//.test(target)) return;
 
 		const clean = WebFetcher.cleanUrl(target);
-		const existing = await rummy.getAttributes(clean);
-		if (existing?.title && !existing?.query) return;
-
 		const fetched = await this.#getFetcher().fetch(clean);
 		if (fetched.error) {
 			console.warn(`[RUMMY] Fetch failed: ${clean} — ${fetched.error}`);
