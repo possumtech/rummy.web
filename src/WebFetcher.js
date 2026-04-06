@@ -49,7 +49,7 @@ export default class WebFetcher {
 
 		try {
 			const response = await page.goto(url, {
-				waitUntil: "domcontentloaded",
+				waitUntil: "networkidle",
 				timeout: FETCH_TIMEOUT,
 			});
 			const status = response?.status() ?? 0;
@@ -58,8 +58,17 @@ export default class WebFetcher {
 
 			await page.addScriptTag({ path: READABILITY_PATH });
 			const article = await page.evaluate(() => {
-				const reader = new Readability(document.cloneNode(true));
-				return reader.parse();
+				const clone = document.cloneNode(true);
+				const reader = new Readability(clone);
+				const parsed = reader.parse();
+				if (!parsed) return null;
+				return {
+					title: parsed.title,
+					content: parsed.content,
+					excerpt: parsed.excerpt,
+					byline: parsed.byline,
+					siteName: parsed.siteName,
+				};
 			});
 
 			if (!article) {

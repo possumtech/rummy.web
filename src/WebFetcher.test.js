@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import WebFetcher from "./WebFetcher.js";
 
 describe("WebFetcher", () => {
@@ -30,6 +30,41 @@ describe("WebFetcher", () => {
 				WebFetcher.cleanUrl("https://docs.example.com/api/v2"),
 				"https://docs.example.com/api/v2",
 			);
+		});
+	});
+
+	describe("fetch", () => {
+		let fetcher;
+
+		before(() => {
+			fetcher = new WebFetcher();
+		});
+
+		after(async () => {
+			await fetcher.close();
+		});
+
+		it("extracts a full Wikipedia article", async () => {
+			const result = await fetcher.fetch(
+				"https://en.wikipedia.org/wiki/Mitch_Hedberg",
+			);
+			assert.ok(!result.error, `fetch error: ${result.error}`);
+			assert.ok(result.title.includes("Mitch Hedberg"));
+			assert.ok(
+				result.content.length > 1000,
+				`content too short: ${result.content.length} chars`,
+			);
+			assert.ok(result.content.includes("comedian"));
+			assert.ok(result.excerpt);
+			assert.ok(result.siteName);
+		});
+
+		it("returns error for 404", async () => {
+			const result = await fetcher.fetch(
+				"https://en.wikipedia.org/wiki/This_Page_Does_Not_Exist_12345",
+			);
+			assert.strictEqual(result.error, "HTTP 404");
+			assert.strictEqual(result.content, null);
 		});
 	});
 });
