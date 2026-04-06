@@ -1,6 +1,8 @@
-import { Readability } from "@mozilla/readability";
-import { JSDOM } from "jsdom";
+import { createRequire } from "node:module";
 import TurndownService from "turndown";
+
+const require = createRequire(import.meta.url);
+const READABILITY_PATH = require.resolve("@mozilla/readability/Readability.js");
 
 const turndown = new TurndownService({
 	headingStyle: "atx",
@@ -37,7 +39,7 @@ export default class WebFetcher {
 
 	/**
 	 * Fetch a URL, extract readable content, convert to markdown.
-	 * Returns { title, content, excerpt, byline, siteName, url } or { url, error }.
+	 * Runs Readability inside the Playwright page (real browser DOM).
 	 */
 	async fetch(rawUrl) {
 		const url = WebFetcher.cleanUrl(rawUrl);
@@ -53,10 +55,18 @@ export default class WebFetcher {
 			const status = response?.status() ?? 0;
 			if (status >= 400)
 				return { url, title: null, content: null, error: `HTTP ${status}` };
-			const html = await page.content();
-			const doc = new JSDOM(html, { url });
-			const article = new Readability(doc.window.document).parse();
-			if (!article) return { url, title: null, content: html.slice(0, 5000) };
+
+			await page.addScriptTag({ path: READABILITY_PATH });
+			const article = await page.evaluate(() => {
+				const reader = new Readability(document.cloneNode(true));
+				return reader.parse();
+			});
+
+			if (!article) {
+				const html = await page.content();
+				return { url, title: null, content: html.slice(0, 5000) };
+			}
+
 			return {
 				url,
 				title: article.title,
