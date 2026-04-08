@@ -5,7 +5,12 @@ Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
 * Optional \`results\` attribute limits the number of results (default: 12)
 * Results appear in context next turn.
-* Use \`<get>\` on a URL from results to fetch full content as markdown.`;
+* Use \`<get>\` on a URL from results to fetch full content as markdown.
+
+## <get>[url]</get> - Fetch a web page
+Example: <get>https://en.wikipedia.org/wiki/Mitch_Hedberg</get>
+* Fetches the page, extracts readable content, and stores as markdown.
+* Always fetches fresh content (no caching).`;
 
 export default class RummyWeb {
 	#core;
@@ -27,9 +32,10 @@ export default class RummyWeb {
 
 		hooks.tools.onHandle("get", this.#handleGet.bind(this), 5);
 
-		core.filter("instructions.toolDocs", (content) =>
-			content ? `${content}\n\n${SEARCH_DOCS}` : SEARCH_DOCS,
-		);
+		core.filter("instructions.toolDocs", (docsMap) => {
+			docsMap.search = SEARCH_DOCS;
+			return docsMap;
+		});
 	}
 
 	#getFetcher() {
@@ -52,8 +58,14 @@ export default class RummyWeb {
 			await rummy.set({
 				path: url,
 				body: `${r.title}\n${r.snippet}`,
-				state: "full",
-				attributes: { query, engine: r.engine },
+				status: 200,
+				fidelity: "summary",
+				attributes: {
+					query,
+					engine: r.engine,
+					title: r.title,
+					snippet: r.snippet,
+				},
 			});
 		}
 
@@ -61,7 +73,7 @@ export default class RummyWeb {
 		await rummy.set({
 			path: entry.resultPath,
 			body: `${results.length} results for "${query}"\n${listing}`,
-			state: "info",
+			status: 200,
 		});
 	}
 
@@ -81,7 +93,7 @@ export default class RummyWeb {
 		await rummy.set({
 			path: clean,
 			body: header + (fetched.content || ""),
-			state: "full",
+			status: 200,
 			attributes: {
 				title: fetched.title,
 				excerpt: fetched.excerpt,
@@ -92,12 +104,12 @@ export default class RummyWeb {
 	}
 
 	#summaryUrl(entry) {
-		const { title, excerpt, byline, siteName } = entry.attributes || {};
+		const { title, excerpt, snippet, byline, siteName } = entry.attributes || {};
 		const lines = [];
 		if (title) lines.push(`## ${title}`);
 		if (siteName || byline)
 			lines.push([siteName, byline].filter(Boolean).join(" — "));
-		if (excerpt) lines.push(excerpt);
+		if (excerpt || snippet) lines.push(excerpt || snippet);
 		return lines.join("\n");
 	}
 
