@@ -104,7 +104,8 @@ export default class RummyWeb {
 	}
 
 	#summaryUrl(entry) {
-		const { title, excerpt, snippet, byline, siteName } = entry.attributes || {};
+		const { title, excerpt, snippet, byline, siteName } =
+			entry.attributes || {};
 		const lines = [];
 		if (title) lines.push(`## ${title}`);
 		if (siteName || byline)
