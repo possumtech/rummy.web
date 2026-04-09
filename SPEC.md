@@ -124,23 +124,20 @@ All model-facing state lives as entries in a unified K/V store (`known_entries` 
 
 Web-relevant schemes and their configuration:
 
-| Scheme | Fidelity | Valid States | Category | Model Visible |
-|---|---|---|---|---|
-| `http` | `turn` | `full`, `summary`, `stored` | `file` | Yes |
-| `https` | `turn` | `full`, `summary`, `stored` | `file` | Yes |
-| `search` | `full` | `full`, `info` | `result` | Yes |
-
-### States and Model Visibility
-
-| Scheme | State | Model Sees | Context Category |
+| Scheme | Fidelity | Category | Model Visible |
 |---|---|---|---|
-| `http`/`https` | `full` | Full markdown content | `file` |
-| `http`/`https` | `summary` | Summary content | `file_summary` |
-| `http`/`https` | `stored` | Path listed only | `file_index` |
-| `search` | `full` | URL listing | `result` |
-| `search` | `info` | Result count + URLs | `result` |
+| `http` | `full`, `summary`, `stored` | `data` | Yes |
+| `https` | `full`, `summary`, `stored` | `data` | Yes |
+| `search` | `full` | `logging` | Yes |
 
-State transitions are enforced by database triggers against the `valid_states` column in the `schemes` table.
+### Fidelity and Model Visibility
+
+| Scheme | Fidelity | Model Sees | Role |
+|---|---|---|---|
+| `http`/`https` | `full` | Full markdown content | Data |
+| `http`/`https` | `summary` | Summary content | Data |
+| `http`/`https` | `stored` | Invisible (retrievable via `<get>`) | Data |
+| `search` | `full` | URL listing | Logging |
 
 ### Entry Attributes
 
@@ -332,10 +329,9 @@ How web entries reach the model:
 2. `instructions.toolDocs` filters run. RummyWeb's filter appends `SEARCH_DOCS`.
 3. `InstructionsPlugin` renders the system prompt with interpolated tool descriptions.
 4. `v_model_context` VIEW selects visible entries. Web entries categorize as:
-   - `file` (http/https at full or summary state)
-   - `file_index` (http/https at stored state)
-   - `result` (search entries)
-5. `ContextAssembler` places file-category entries in the system message and result-category entries in user message tool results.
+   - `data` (http/https — persistent content the model carries)
+   - `logging` (search — records of search operations)
+5. `ContextAssembler` places data-category entries in `<knowns>` (system message) and logging-category entries in `<current>`/`<previous>` (user message).
 
 ## Design Decisions
 
