@@ -3,7 +3,7 @@ import WebFetcher from "./WebFetcher.js";
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
-* Query results will appear as summaries at "summary" fidelity. Promote to "full" to read the entire page.
+* Results are titles and snippets at "summary" fidelity. Use <get> on a result URL to fetch the full page.
 
 ## <get>[url]</get> - Fetch a web page
 Example: <get>https://en.wikipedia.org/wiki/Mitch_Hedberg</get>
