@@ -85,9 +85,9 @@ Passed to handlers as the second argument. Per-turn scope.
 
 | Method | Effect |
 |---|---|
-| `rummy.set({ path, body, state, attributes })` | Create/update entry |
-| `rummy.get(path)` | Promote to full state |
-| `rummy.store(path)` | Demote to stored state |
+| `rummy.set({ path, body, status, fidelity, attributes })` | Create/update entry |
+| `rummy.get(path)` | Promote to full fidelity |
+| `rummy.store(path)` | Demote to stored fidelity |
 | `rummy.rm(path)` | Delete permanently |
 | `rummy.mv(from, to)` | Move entry |
 | `rummy.cp(from, to)` | Copy entry |
@@ -187,8 +187,8 @@ All registration is cross-scheme (this plugin's `core.name` is `"web"`, but it r
 
 1. Extract query from `attrs.path` or `entry.body`.
 2. Query SearXNG via `WebFetcher.search(query, { limit })`.
-3. For each result, clean the URL and call `rummy.set()` to create an `https://` entry at `summary` state with `title + snippet` body and `{ query, engine }` attributes.
-4. Upsert the result entry at `info` state with the URL listing.
+3. For each result, clean the URL and call `rummy.set()` to create an `https://` entry at `summary` fidelity with `title + snippet` body and `{ query, engine }` attributes.
+4. Upsert the result entry at status 200 with the URL listing.
 
 ### Handler: `get` (priority 5)
 
@@ -199,7 +199,7 @@ Priority 5 runs before the core get handler at priority 10.
 3. Clean the URL via `WebFetcher.cleanUrl()`.
 4. Fetch via `WebFetcher.fetch()` (Playwright + Readability + Turndown).
 5. On error: log warning, return (don't stop chain).
-6. On success: upsert at `full` state with markdown body and `{ title, excerpt, byline, siteName }` attributes.
+6. On success: upsert at `full` fidelity with markdown body and `{ title, excerpt, byline, siteName }` attributes.
 
 ### View: `search` (full fidelity)
 
@@ -246,7 +246,7 @@ Model emits <search>query</search>
   → hooks.tools.dispatch("search", entry, rummy)
     → RummyWeb#handleSearch fires
     → Creates https:// entries at "summary" via rummy.set()
-    → Updates search:// result entry to "info"
+    → Updates search:// result entry at status 200
   → hooks.entry.created.emit(entry)
 ```
 

@@ -3,14 +3,11 @@ import WebFetcher from "./WebFetcher.js";
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
-* Optional \`results\` attribute limits the number of results (default: 12)
-* Results appear in context next turn.
-* Use \`<get>\` on a URL from results to fetch full content as markdown.
+* Query results will appear as summaries at "summary" fidelity. Promote to "full" to read the entire page.
 
 ## <get>[url]</get> - Fetch a web page
 Example: <get>https://en.wikipedia.org/wiki/Mitch_Hedberg</get>
-* Fetches the page, extracts readable content, and stores as markdown.
-* Always fetches fresh content (no caching).`;
+* Fetches entire web page at "full" fidelity`;
 
 export default class RummyWeb {
 	#core;
