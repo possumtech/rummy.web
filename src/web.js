@@ -3,11 +3,8 @@ import WebFetcher from "./WebFetcher.js";
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
-* Results are titles and snippets at "demoted" fidelity. Use <get> on a result URL to fetch the full page.
-
-## <get>[url]</get> - Fetch a web page
-Example: <get>https://en.wikipedia.org/wiki/Mitch_Hedberg</get>
-* Fetches entire web page at "promoted" fidelity`;
+* Results are titles and snippets at "demoted" fidelity.
+* Use <get>https://example.com/page</get> on a result URL to fetch the full page (promoted).`;
 
 export default class RummyWeb {
 	#core;
