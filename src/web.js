@@ -3,11 +3,11 @@ import WebFetcher from "./WebFetcher.js";
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
-* Results are titles and snippets at "summary" fidelity. Use <get> on a result URL to fetch the full page.
+* Results are titles and snippets at "demoted" fidelity. Use <get> on a result URL to fetch the full page.
 
 ## <get>[url]</get> - Fetch a web page
 Example: <get>https://en.wikipedia.org/wiki/Mitch_Hedberg</get>
-* Fetches entire web page at "full" fidelity`;
+* Fetches entire web page at "promoted" fidelity`;
 
 export default class RummyWeb {
 	#core;
@@ -20,12 +20,12 @@ export default class RummyWeb {
 
 		hooks.tools.ensureTool("search");
 		hooks.tools.onHandle("search", this.#handleSearch.bind(this));
-		hooks.tools.onView("search", this.#viewSearch.bind(this), "full");
+		hooks.tools.onView("search", this.#viewSearch.bind(this), "promoted");
 
 		hooks.tools.onView("http", (entry) => entry.body);
-		hooks.tools.onView("http", this.#summaryUrl, "summary");
+		hooks.tools.onView("http", this.#summaryUrl, "demoted");
 		hooks.tools.onView("https", (entry) => entry.body);
-		hooks.tools.onView("https", this.#summaryUrl, "summary");
+		hooks.tools.onView("https", this.#summaryUrl, "demoted");
 
 		hooks.tools.onHandle("get", this.#handleGet.bind(this), 5);
 
@@ -56,7 +56,7 @@ export default class RummyWeb {
 				path: url,
 				body: `${r.title}\n${r.snippet}`,
 				status: 200,
-				fidelity: "summary",
+				fidelity: "demoted",
 				attributes: {
 					query,
 					engine: r.engine,
