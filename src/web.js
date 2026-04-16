@@ -102,10 +102,21 @@ export default class RummyWeb {
 		const clean = WebFetcher.cleanUrl(target);
 
 		// If search already prefetched this page, just promote it.
-		const existing = await rummy.getAttributes(clean);
-		if (existing?.prefetched) {
-			await rummy.setFidelity(clean, "promoted");
-			return;
+		const existing = await rummy.getEntry(clean);
+		if (existing?.attributes) {
+			const attrs =
+				typeof existing.attributes === "string"
+					? JSON.parse(existing.attributes)
+					: existing.attributes;
+			if (attrs?.prefetched) {
+				await rummy.set({
+					path: clean,
+					body: existing.body,
+					status: 200,
+					fidelity: "promoted",
+				});
+				return;
+			}
 		}
 
 		// Not prefetched (direct <get> on a URL) — fetch now.

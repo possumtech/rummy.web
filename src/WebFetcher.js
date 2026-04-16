@@ -10,6 +10,8 @@ const turndown = new TurndownService({
 });
 
 const FETCH_TIMEOUT = Number(process.env.RUMMY_FETCH_TIMEOUT) || 15000;
+const SEARCH_BACKEND = process.env.RUMMY_SEARCH || "searxng";
+const BRAVE_API_KEY = process.env.BRAVE_API_KEY || "";
 
 // https://en.wikipedia.org/wiki/Foo → mobile-html API for clean content
 const WIKI_PATTERN = /^(https?:\/\/[a-z]+\.wikipedia\.org)\/wiki\/(.+)$/;
@@ -103,9 +105,15 @@ export default class WebFetcher {
 	}
 
 	/**
-	 * Search via SearXNG. Returns array of result objects.
+	 * Search the web. Dispatches to the configured backend.
+	 * Returns [{ title, url, snippet, engine }].
 	 */
 	async search(query, { limit = 12, language = "en" } = {}) {
+		if (SEARCH_BACKEND === "brave") return this.#searchBrave(query, { limit });
+		return this.#searchSearxng(query, { limit, language });
+	}
+
+	async #searchSearxng(query, { limit, language }) {
 		const base = process.env.RUMMY_SEARXNG_URL;
 		if (!base) throw new Error("RUMMY_SEARXNG_URL not configured");
 
@@ -126,6 +134,33 @@ export default class WebFetcher {
 			url: r.url,
 			snippet: r.content || "",
 			engine: r.engine,
+		}));
+	}
+
+	async #searchBrave(query, { limit }) {
+		if (!BRAVE_API_KEY) throw new Error("BRAVE_API_KEY not configured");
+
+		const url = new URL("https://api.search.brave.com/res/v1/web/search");
+		url.searchParams.set("q", query);
+		url.searchParams.set("count", String(Math.min(limit, 20)));
+
+		const response = await fetch(url, {
+			headers: {
+				Accept: "application/json",
+				"Accept-Encoding": "gzip",
+				"X-Subscription-Token": BRAVE_API_KEY,
+			},
+			signal: AbortSignal.timeout(FETCH_TIMEOUT),
+		});
+		if (!response.ok) {
+			throw new Error(`Brave ${response.status}: ${response.statusText}`);
+		}
+		const data = await response.json();
+		return (data.web?.results || []).slice(0, limit).map((r) => ({
+			title: r.title,
+			url: r.url,
+			snippet: r.description || "",
+			engine: "brave",
 		}));
 	}
 
