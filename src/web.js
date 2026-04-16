@@ -47,20 +47,41 @@ export default class RummyWeb {
 		const limit = attrs.results || 12;
 		const results = await this.#getFetcher().search(query, { limit });
 
-		const urls = [];
-		for (const r of results) {
-			const url = WebFetcher.cleanUrl(r.url);
-			urls.push(url);
+		// Prefetch all pages concurrently so the model sees real token
+		// counts at demoted fidelity. Without this, the model has no way
+		// to budget — it sees snippet tokens (140) not page tokens (112K).
+		const fetcher = this.#getFetcher();
+		const urls = results.map((r) => WebFetcher.cleanUrl(r.url));
+		const pages = await Promise.allSettled(
+			urls.map((url) => fetcher.fetch(url)),
+		);
+
+		for (let i = 0; i < results.length; i++) {
+			const r = results[i];
+			const url = urls[i];
+			const page = pages[i];
+			const fetched = page.status === "fulfilled" ? page.value : null;
+			const fetchOk = fetched && !fetched.error;
+
+			const header = fetchOk && fetched.title ? `# ${fetched.title}\n\n` : "";
+			const body = fetchOk
+				? header + (fetched.content || "")
+				: `${r.title}\n${r.snippet}`;
+
 			await rummy.set({
 				path: url,
-				body: `${r.title}\n${r.snippet}`,
+				body,
 				status: 200,
 				fidelity: "demoted",
 				attributes: {
 					query,
 					engine: r.engine,
-					title: r.title,
+					title: fetchOk ? fetched.title || r.title : r.title,
 					snippet: r.snippet,
+					excerpt: fetchOk ? fetched.excerpt : null,
+					byline: fetchOk ? fetched.byline : null,
+					siteName: fetchOk ? fetched.siteName : null,
+					prefetched: fetchOk,
 				},
 			});
 		}
@@ -79,6 +100,15 @@ export default class RummyWeb {
 		if (!target || !/^https?:\/\//.test(target)) return;
 
 		const clean = WebFetcher.cleanUrl(target);
+
+		// If search already prefetched this page, just promote it.
+		const existing = await rummy.getAttributes(clean);
+		if (existing?.prefetched) {
+			await rummy.setFidelity(clean, "promoted");
+			return;
+		}
+
+		// Not prefetched (direct <get> on a URL) — fetch now.
 		const fetched = await this.#getFetcher().fetch(clean);
 		if (fetched.error) {
 			console.warn(`[RUMMY] Fetch failed: ${clean} — ${fetched.error}`);
