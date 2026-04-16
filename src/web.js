@@ -16,6 +16,8 @@ export default class RummyWeb {
 		const { hooks } = core;
 
 		hooks.tools.ensureTool("search");
+		core.registerScheme({ name: "http", category: "data" });
+		core.registerScheme({ name: "https", category: "data" });
 		hooks.tools.onHandle("search", this.#handleSearch.bind(this));
 		hooks.tools.onView("search", this.#viewSearch.bind(this), "promoted");
 
