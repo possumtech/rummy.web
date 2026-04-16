@@ -11,6 +11,15 @@ const turndown = new TurndownService({
 
 const FETCH_TIMEOUT = Number(process.env.RUMMY_FETCH_TIMEOUT) || 15000;
 
+// https://en.wikipedia.org/wiki/Foo → mobile-html API for clean content
+const WIKI_PATTERN = /^(https?:\/\/[a-z]+\.wikipedia\.org)\/wiki\/(.+)$/;
+
+function toWikiMobileUrl(url) {
+	const match = WIKI_PATTERN.exec(url);
+	if (!match) return null;
+	return `${match[1]}/api/rest_v1/page/mobile-html/${match[2]}`;
+}
+
 export default class WebFetcher {
 	#browser = null;
 	#launching = null;
@@ -43,12 +52,14 @@ export default class WebFetcher {
 	 */
 	async fetch(rawUrl) {
 		const url = WebFetcher.cleanUrl(rawUrl);
+		const fetchUrl = toWikiMobileUrl(url) || url;
 		const browser = await this.#getBrowser();
-		const context = await browser.newContext();
+		const { devices } = await import("playwright");
+		const context = await browser.newContext(devices["Pixel 5"]);
 		const page = await context.newPage();
 
 		try {
-			const response = await page.goto(url, {
+			const response = await page.goto(fetchUrl, {
 				waitUntil: "networkidle",
 				timeout: FETCH_TIMEOUT,
 			});

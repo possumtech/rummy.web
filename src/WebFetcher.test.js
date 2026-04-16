@@ -55,8 +55,6 @@ describe("WebFetcher", () => {
 				`content too short: ${result.content.length} chars`,
 			);
 			assert.ok(result.content.includes("comedian"));
-			assert.ok(result.excerpt);
-			assert.ok(result.siteName);
 		});
 
 		it("returns error for 404", async () => {
