@@ -10,6 +10,7 @@ const turndown = new TurndownService({
 });
 
 const FETCH_TIMEOUT = Number(process.env.RUMMY_FETCH_TIMEOUT) || 15000;
+const IDLE_TIMEOUT = 15 * 60 * 1000; // 15 minutes
 const SEARCH_BACKEND = process.env.RUMMY_SEARCH || "searxng";
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY || "";
 
@@ -24,17 +25,38 @@ function toWikiMobileUrl(url) {
 
 export default class WebFetcher {
 	#browser = null;
+	#context = null;
 	#launching = null;
+	#idleTimer = null;
 
-	async #getBrowser() {
-		if (this.#browser) return this.#browser;
-		if (this.#launching) return this.#launching;
-		this.#launching = (async () => {
-			const { chromium } = await import("playwright");
-			this.#browser = await chromium.launch({ headless: true });
-			return this.#browser;
-		})();
-		return this.#launching;
+	/**
+	 * Get the persistent browser context, launching Playwright on first
+	 * call. The browser + context stay alive across requests (warm DNS,
+	 * cache, connections) and shut down after 15 minutes of inactivity.
+	 */
+	async #getContext() {
+		this.#touchIdle();
+		if (this.#context) return this.#context;
+
+		if (!this.#browser) {
+			if (!this.#launching) {
+				this.#launching = (async () => {
+					const { chromium } = await import("playwright");
+					return chromium.launch({ headless: true });
+				})();
+			}
+			this.#browser = await this.#launching;
+			this.#launching = null;
+		}
+
+		const { devices } = await import("playwright");
+		this.#context = await this.#browser.newContext(devices["Pixel 5"]);
+		return this.#context;
+	}
+
+	#touchIdle() {
+		if (this.#idleTimer) clearTimeout(this.#idleTimer);
+		this.#idleTimer = setTimeout(() => this.close(), IDLE_TIMEOUT);
 	}
 
 	/**
@@ -49,59 +71,87 @@ export default class WebFetcher {
 	}
 
 	/**
-	 * Fetch a URL, extract readable content, convert to markdown.
-	 * Runs Readability inside the Playwright page (real browser DOM).
+	 * Fetch a single page. Opens a tab in the persistent context,
+	 * runs Readability, converts to markdown, closes the tab.
 	 */
-	async fetch(rawUrl) {
+	async fetch(
+		rawUrl,
+		{ timeout = FETCH_TIMEOUT, waitUntil = "networkidle" } = {},
+	) {
 		const url = WebFetcher.cleanUrl(rawUrl);
 		const fetchUrl = toWikiMobileUrl(url) || url;
-		const browser = await this.#getBrowser();
-		const { devices } = await import("playwright");
-		const context = await browser.newContext(devices["Pixel 5"]);
+		const context = await this.#getContext();
 		const page = await context.newPage();
 
 		try {
-			const response = await page.goto(fetchUrl, {
-				waitUntil: "networkidle",
-				timeout: FETCH_TIMEOUT,
-			});
-			const status = response?.status() ?? 0;
-			if (status >= 400)
-				return { url, title: null, content: null, error: `HTTP ${status}` };
-
-			await page.addScriptTag({ path: READABILITY_PATH });
-			const article = await page.evaluate(() => {
-				const clone = document.cloneNode(true);
-				const reader = new Readability(clone);
-				const parsed = reader.parse();
-				if (!parsed) return null;
-				return {
-					title: parsed.title,
-					content: parsed.content,
-					excerpt: parsed.excerpt,
-					byline: parsed.byline,
-					siteName: parsed.siteName,
-				};
-			});
-
-			if (!article) {
-				const html = await page.content();
-				return { url, title: null, content: html.slice(0, 5000) };
-			}
-
-			return {
-				url,
-				title: article.title,
-				content: turndown.turndown(article.content),
-				excerpt: article.excerpt || null,
-				byline: article.byline || null,
-				siteName: article.siteName || null,
-			};
+			const response = await page.goto(fetchUrl, { waitUntil, timeout });
+			return await this.#extract(url, page, response);
 		} catch (err) {
 			return { url, title: null, content: null, error: err.message };
 		} finally {
-			await context.close();
+			await page.close();
 		}
+	}
+
+	/**
+	 * Fetch multiple URLs as concurrent tabs in the persistent context.
+	 * Shared DNS, cache, and connections across all pages.
+	 */
+	async fetchAll(urls, { timeout = 5000 } = {}) {
+		const context = await this.#getContext();
+		return Promise.allSettled(
+			urls.map(async (rawUrl) => {
+				const url = WebFetcher.cleanUrl(rawUrl);
+				const fetchUrl = toWikiMobileUrl(url) || url;
+				const page = await context.newPage();
+				try {
+					const response = await page.goto(fetchUrl, {
+						waitUntil: "networkidle",
+						timeout,
+					});
+					return await this.#extract(url, page, response);
+				} catch (err) {
+					return { url, title: null, content: null, error: err.message };
+				} finally {
+					await page.close();
+				}
+			}),
+		);
+	}
+
+	async #extract(url, page, response) {
+		const status = response?.status() ?? 0;
+		if (status >= 400)
+			return { url, title: null, content: null, error: `HTTP ${status}` };
+
+		await page.addScriptTag({ path: READABILITY_PATH });
+		const article = await page.evaluate(() => {
+			const clone = document.cloneNode(true);
+			const reader = new Readability(clone);
+			const parsed = reader.parse();
+			if (!parsed) return null;
+			return {
+				title: parsed.title,
+				content: parsed.content,
+				excerpt: parsed.excerpt,
+				byline: parsed.byline,
+				siteName: parsed.siteName,
+			};
+		});
+
+		if (!article) {
+			const html = await page.content();
+			return { url, title: null, content: html.slice(0, 5000) };
+		}
+
+		return {
+			url,
+			title: article.title,
+			content: turndown.turndown(article.content),
+			excerpt: article.excerpt || null,
+			byline: article.byline || null,
+			siteName: article.siteName || null,
+		};
 	}
 
 	/**
@@ -165,10 +215,18 @@ export default class WebFetcher {
 	}
 
 	async close() {
-		if (this.#browser) {
-			await this.#browser.close();
-			this.#browser = null;
-			this.#launching = null;
+		if (this.#idleTimer) {
+			clearTimeout(this.#idleTimer);
+			this.#idleTimer = null;
 		}
+		if (this.#context) {
+			await this.#context.close().catch(() => {});
+			this.#context = null;
+		}
+		if (this.#browser) {
+			await this.#browser.close().catch(() => {});
+			this.#browser = null;
+		}
+		this.#launching = null;
 	}
 }

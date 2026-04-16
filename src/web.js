@@ -47,14 +47,12 @@ export default class RummyWeb {
 		const limit = attrs.results || 12;
 		const results = await this.#getFetcher().search(query, { limit });
 
-		// Prefetch all pages concurrently so the model sees real token
-		// counts at demoted fidelity. Without this, the model has no way
-		// to budget — it sees snippet tokens (140) not page tokens (112K).
+		// Prefetch all pages in a shared browser context so the model
+		// sees real token counts at demoted fidelity. Shared context =
+		// shared DNS/cache/connections; 5s timeout per page, snippet fallback.
 		const fetcher = this.#getFetcher();
 		const urls = results.map((r) => WebFetcher.cleanUrl(r.url));
-		const pages = await Promise.allSettled(
-			urls.map((url) => fetcher.fetch(url)),
-		);
+		const pages = await fetcher.fetchAll(urls, { timeout: 5000 });
 
 		for (let i = 0; i < results.length; i++) {
 			const r = results[i];
@@ -71,7 +69,7 @@ export default class RummyWeb {
 			await rummy.set({
 				path: url,
 				body,
-				status: 200,
+				status: fetchOk ? 200 : 408,
 				fidelity: "demoted",
 				attributes: {
 					query,
