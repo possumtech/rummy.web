@@ -9,10 +9,8 @@ Plugins export a class whose constructor receives a `PluginContext`:
 ```javascript
 export default class RummyWeb {
     #core;
-
     constructor(core) {
         this.#core = core;
-        // Register handlers, views, filters via core
     }
 }
 ```
@@ -23,59 +21,63 @@ External plugins load via `RUMMY_PLUGIN_*` env vars:
 RUMMY_PLUGIN_WEB=@possumtech/rummy.web
 ```
 
-The plugin loader imports the default export and instantiates with `new Plugin(core)`. The plugin name is derived from the env var key (`RUMMY_PLUGIN_WEB` → `"web"`). Graceful failure if not installed.
-
-Plugins that still export a `static register(hooks)` method are supported for backward compatibility.
+The plugin name is derived from the env var key (`RUMMY_PLUGIN_WEB` → `"web"`).
 
 ## PluginContext API
 
-The `core` object passed to the constructor.
+### `core.ensureTool()`
 
-### Registration: `core.on(event, callback, priority?)`
+Declares the plugin as a model-facing tool. Required for the tool to appear in the model's tool list.
 
-| Event | Purpose |
-|---|---|
-| `"handler"` | Tool handler — scoped to `core.name` |
-| `"full"` | Full projection — scoped to `core.name` |
-| `"summary"` | Summary projection — scoped to `core.name` |
-| `"turn"` | Turn processor — runs before context materialization |
-| `"entry.created"` | Entry created during dispatch |
-| `"entry.changed"` | File entries changed on disk |
-| Any `"dotted.name"` | Resolves to the matching hook in the hook tree |
+### `core.registerScheme(config?)`
 
-### Registration: `core.filter(name, callback, priority?)`
+Registers the plugin's scheme in the database:
 
-| Filter | Purpose |
-|---|---|
-| `"instructions.toolDocs"` | Append tool documentation to system prompt |
-| `"assembly.system"` | Contribute to system message |
-| `"assembly.user"` | Contribute to user message |
-| `"llm.messages"` | Transform final messages before LLM call |
-| `"llm.response"` | Transform LLM response |
-| Any `"dotted.name"` | Resolves to the matching filter in the hook tree |
+```javascript
+core.registerScheme({
+    name: "https",        // defaults to plugin name
+    category: "data",     // "data" | "logging" | "unknown" | "prompt"
+    scope: "run",         // "run" | "project" | "global"
+    writableBy: ["model", "plugin"],
+});
+```
 
-### Properties
+### `core.on(event, callback, priority?)`
 
-| Property | Type | Description |
+| Event | Payload | Purpose |
 |---|---|---|
-| `core.name` | String | Plugin name as derived by the loader |
-| `core.hooks` | Hooks | Full hook system (for cross-scheme registration) |
-| `core.db` | Database | SQLRite prepared statements (available after DB init) |
-| `core.entries` | KnownStore | K/V store API (available after DB init) |
+| `"handler"` | `(entry, rummy)` | Tool handler — scoped to `core.name` |
+| `"promoted"` | `(entry)` | Promoted-fidelity projection |
+| `"demoted"` | `(entry)` | Demoted-fidelity projection |
+| `"turn.started"` | `({rummy, mode, prompt, ...})` | Turn beginning |
+| `"turn.response"` | `({rummy, turn, result, ...})` | LLM responded |
+| `"turn.proposing"` | `({rummy, recorded})` | Tool dispatched |
+| `"turn.completed"` | `(turnResult)` | Turn resolved |
+| `"entry.created"` | `(entry)` | Entry created during dispatch |
+| `"entry.changed"` | `({runId, path, changeType})` | Entry modified |
+| Any `"dotted.name"` | varies | Resolves to matching hook |
+
+### `core.filter(name, callback, priority?)`
+
+| Filter | Signature | Purpose |
+|---|---|---|
+| `"instructions.toolDocs"` | `(docsMap) → docsMap` | Add tool documentation |
+| `"assembly.system"` | `(content, ctx) → content` | Contribute to system message |
+| `"assembly.user"` | `(content, ctx) → content` | Contribute to user message |
+| `"llm.messages"` | `(messages) → messages` | Transform messages before LLM call |
+| `"llm.response"` | `(response) → response` | Transform LLM response |
 
 ### Cross-Scheme Registration
 
-`core.on("handler")` and `core.on("full")` register against `core.name`. To register handlers or views on other schemes, use `core.hooks` directly:
+`core.on("handler")` and `core.on("promoted")` register against `core.name`. To register handlers or views on schemes this plugin doesn't own, use `core.hooks` directly:
 
 ```javascript
-core.hooks.tools.ensureTool("search");
-core.hooks.tools.onHandle("search", handler);
-core.hooks.tools.onView("search", viewFn, "full");
-core.hooks.tools.onView("http", viewFn);
-core.hooks.tools.onHandle("get", handler, 5);
+hooks.tools.ensureTool("search");
+hooks.tools.onHandle("search", handler);
+hooks.tools.onView("search", viewFn, "promoted");
+hooks.tools.onView("https", viewFn);
+hooks.tools.onHandle("get", handler, 5);
 ```
-
-This is the established pattern for plugins that extend tools they don't own (see `file.js` in core).
 
 ## RummyContext API
 
@@ -85,70 +87,86 @@ Passed to handlers as the second argument. Per-turn scope.
 
 | Method | Effect |
 |---|---|
-| `rummy.set({ path, body, status, fidelity, attributes })` | Create/update entry |
-| `rummy.get(path)` | Promote to full fidelity |
-| `rummy.store(path)` | Demote to stored fidelity |
-| `rummy.rm(path)` | Delete permanently |
-| `rummy.mv(from, to)` | Move entry |
+| `rummy.set({ path?, body?, state?, fidelity?, outcome?, attributes? })` | Create/update entry. State defaults to `"resolved"`. |
+| `rummy.get(path)` | Promote entries matching pattern |
+| `rummy.rm(path)` | Remove entry |
+| `rummy.mv(from, to)` | Rename entry |
 | `rummy.cp(from, to)` | Copy entry |
+| `rummy.update(body, { status?, attributes? })` | Write lifecycle signal |
 
 ### Query Methods
 
 | Method | Returns |
 |---|---|
-| `rummy.getEntry(path)` | Full entry object |
 | `rummy.getBody(path)` | Body text or null |
-| `rummy.getState(path)` | State string or null |
-| `rummy.getAttributes(path)` | Parsed attributes `{}` |
+| `rummy.getState(path)` | State (`"proposed"` \| `"streaming"` \| `"resolved"` \| `"failed"` \| `"cancelled"`) or null |
+| `rummy.getAttributes(path)` | Parsed attributes `{}` or null |
+| `rummy.getEntry(path)` | First matching entry or null |
 | `rummy.getEntries(pattern, body?)` | Array of matching entries |
+| `rummy.setAttributes(path, attrs)` | Merge attributes |
 
 ### Properties
 
 | Property | Type | Description |
 |---|---|---|
-| `rummy.entries` | KnownStore | Direct store access |
-| `rummy.db` | Database | SQLRite prepared statements |
+| `rummy.entries` | Repository proxy | Auto-binds `writer` on writes |
+| `rummy.db` | SqlRite db | Database access |
+| `rummy.hooks` | Hook registry | Full hook system |
 | `rummy.runId` | Number | Current run ID |
 | `rummy.projectId` | Number | Current project ID |
 | `rummy.sequence` | Number | Current turn number |
-
-### Direct Store Access
-
-Handlers may use `rummy.entries` (KnownStore) directly for operations not covered by the verb/query API, such as `upsert` with explicit `runId` and `turn`. This is the established pattern used by core plugins.
+| `rummy.type` | `"ask"` \| `"act"` | Current mode |
+| `rummy.writer` | String | Default `"model"` in handler dispatch |
+| `rummy.noWeb` | Boolean | Loop flag — web tools disabled |
 
 ## Entry System
 
-All model-facing state lives as entries in a unified K/V store (`known_entries` table) keyed by URI-scheme paths.
+All model-facing state lives as entries in a unified K/V store keyed by URI-scheme paths.
 
 ### Schemes
 
-Web-relevant schemes and their configuration:
+Web-relevant schemes registered by this plugin:
 
-| Scheme | Fidelity | Category | Model Visible |
-|---|---|---|---|
-| `http` | `full`, `summary`, `stored` | `data` | Yes |
-| `https` | `full`, `summary`, `stored` | `data` | Yes |
-| `search` | `full` | `logging` | Yes |
+| Scheme | Category | Description |
+|---|---|---|
+| `http` | `data` | Fetched web page content |
+| `https` | `data` | Fetched web page content |
+| `search` | `logging` | Search operation results |
 
-### Fidelity and Model Visibility
+### Fidelity
 
-| Scheme | Fidelity | Model Sees | Role |
-|---|---|---|---|
-| `http`/`https` | `full` | Full markdown content | Data |
-| `http`/`https` | `summary` | Summary content | Data |
-| `http`/`https` | `stored` | Invisible (retrievable via `<get>`) | Data |
-| `search` | `full` | URL listing | Logging |
+| Fidelity | Model Sees |
+|---|---|
+| `promoted` | Full body content in `<knowns>` |
+| `demoted` | Path + token count + `attributes.summary` only |
+
+### Entry States
+
+| State | Meaning |
+|---|---|
+| `resolved` | Operation completed successfully |
+| `proposed` | Awaiting client resolution |
+| `streaming` | In progress |
+| `failed` | Operation failed |
+| `cancelled` | Operation cancelled |
 
 ### Entry Attributes
 
-Metadata stored as JSON in `entry.attributes`, invisible to the model unless a view function surfaces it:
-
-**Search result entries** (`https://` at `summary`):
+**Prefetched search results** (`https://` at `demoted`):
 ```json
-{ "query": "the search query", "engine": "bing" }
+{
+    "query": "the search query",
+    "engine": "brave",
+    "title": "Page Title",
+    "snippet": "Search result snippet",
+    "excerpt": "Readability excerpt",
+    "byline": "Author",
+    "siteName": "example.com",
+    "prefetched": true
+}
 ```
 
-**Fetched URL entries** (`https://` at `full`):
+**Directly fetched URLs** (`https://` at `promoted`):
 ```json
 {
     "title": "Page Title",
@@ -167,73 +185,85 @@ constructor(core) {
     const { hooks } = core;
 
     hooks.tools.ensureTool("search");
+    core.registerScheme({ name: "http", category: "data" });
+    core.registerScheme({ name: "https", category: "data" });
     hooks.tools.onHandle("search", this.#handleSearch.bind(this));
-    hooks.tools.onView("search", this.#viewSearch.bind(this), "full");
+    hooks.tools.onView("search", this.#viewSearch.bind(this), "promoted");
 
     hooks.tools.onView("http", (entry) => entry.body);
+    hooks.tools.onView("http", this.#summaryUrl, "demoted");
     hooks.tools.onView("https", (entry) => entry.body);
+    hooks.tools.onView("https", this.#summaryUrl, "demoted");
 
     hooks.tools.onHandle("get", this.#handleGet.bind(this), 5);
 
-    core.filter("instructions.toolDocs", (content) =>
-        content ? `${content}\n\n${SEARCH_DOCS}` : SEARCH_DOCS,
-    );
+    core.filter("instructions.toolDocs", (docsMap) => {
+        docsMap.search = SEARCH_DOCS;
+        return docsMap;
+    });
 }
 ```
 
-All registration is cross-scheme (this plugin's `core.name` is `"web"`, but it registers on `search`, `get`, `http`, and `https`), so it goes through `core.hooks` directly. Doc injection uses `core.filter("instructions.toolDocs")`, the established pattern used by all core plugins.
+All registration is cross-scheme (`core.name` is `"web"`, but it registers on `search`, `get`, `http`, and `https`), so it goes through `core.hooks` directly.
 
 ### Handler: `search` (default priority)
 
 1. Extract query from `attrs.path` or `entry.body`.
-2. Query SearXNG via `WebFetcher.search(query, { limit })`.
-3. For each result, clean the URL and call `rummy.set()` to create an `https://` entry at `summary` fidelity with `title + snippet` body and `{ query, engine }` attributes.
-4. Upsert the result entry at status 200 with the URL listing.
+2. Query configured search backend (SearXNG or Brave).
+3. Prefetch all result pages concurrently via `fetcher.fetchAll(urls, { timeout: 5000 })`.
+4. For each successful fetch, store an `https://` entry at `demoted` fidelity with full page content and `{ query, engine, title, snippet, excerpt, byline, siteName, prefetched: true }` attributes.
+5. Failed prefetches are dropped from results.
+6. Store result listing at `entry.resultPath` with state `"resolved"`.
 
 ### Handler: `get` (priority 5)
 
 Priority 5 runs before the core get handler at priority 10.
 
 1. Check `attrs.path` matches `/^https?:\/\//`. If not, return (pass to next handler).
-2. Check if the URL already exists in the store (deduplication). If found, return.
-3. Clean the URL via `WebFetcher.cleanUrl()`.
-4. Fetch via `WebFetcher.fetch()` (Playwright + Readability + Turndown).
-5. On error: log warning, return (don't stop chain).
-6. On success: upsert at `full` fidelity with markdown body and `{ title, excerpt, byline, siteName }` attributes.
+2. If the entry has `prefetched: true` in attributes, return — let the core get handler promote the existing entry.
+3. Otherwise, fetch the page via `WebFetcher.fetch()`.
+4. On error: log warning, return.
+5. On success: store at state `"resolved"` with markdown body and metadata attributes.
 
-### View: `search` (full fidelity)
+### Views
 
-```javascript
-`# search "${attrs.path || ""}"\n${entry.body}`
+**Promoted** (`http`/`https`): pass-through `entry.body` — the full markdown content.
+
+**Demoted** (`http`/`https`): compact card from attributes:
+```
+## Page Title
+siteName — Author
+Excerpt or search snippet
 ```
 
-### Views: `http` and `https`
-
-Pass-through: `(entry) => entry.body`. The body is the markdown content itself.
+**Promoted** (`search`): `# search "query"\n{url listing}`
 
 ### Doc Injection
 
 ```javascript
-core.filter("instructions.toolDocs", (content) =>
-    content ? `${content}\n\n${SEARCH_DOCS}` : SEARCH_DOCS,
-);
+core.filter("instructions.toolDocs", (docsMap) => {
+    docsMap.search = SEARCH_DOCS;
+    return docsMap;
+});
 ```
+
+Uses the docsMap pattern — the instructions plugin filters by active tool set automatically.
 
 ## Handler Priority Chain
 
 ```
-Dispatch "get" for https://example.com
-  Priority 5:  RummyWeb#handleGet — detects URL, fetches, upserts markdown
-  Priority 10: Core Get#handler — skipped (already handled)
+Dispatch "get" for https://example.com (prefetched)
+  Priority 5:  RummyWeb#handleGet — prefetched=true, returns
+  Priority 10: Core Get#handler — promotes entry to promoted fidelity
+
+Dispatch "get" for https://example.com (not prefetched)
+  Priority 5:  RummyWeb#handleGet — fetches page, stores entry
+  Priority 10: Core Get#handler — runs on stored entry
 
 Dispatch "get" for src/app.js
-  Priority 5:  RummyWeb#handleGet — not a URL, returns (implicit continue)
-  Priority 10: Core Get#handler — promotes file entry to full
+  Priority 5:  RummyWeb#handleGet — not a URL, returns
+  Priority 10: Core Get#handler — promotes file entry
 ```
-
-Handler return semantics:
-- **Implicit return** (no return value): chain continues to next handler.
-- **Return `false`**: stop chain, entry fully handled.
 
 ## Entry Dispatch Lifecycle
 
@@ -242,11 +272,12 @@ Handler return semantics:
 ```
 Model emits <search>query</search>
   → XmlParser produces { name: "search", path: "query" }
-  → TurnExecutor records search:// entry at "full"
+  → TurnExecutor records search:// entry
   → hooks.tools.dispatch("search", entry, rummy)
     → RummyWeb#handleSearch fires
-    → Creates https:// entries at "summary" via rummy.set()
-    → Updates search:// result entry at status 200
+    → Prefetches all result pages via fetchAll()
+    → Creates https:// entries at demoted fidelity
+    → Stores result listing at entry.resultPath
   → hooks.entry.created.emit(entry)
 ```
 
@@ -254,117 +285,127 @@ Model emits <search>query</search>
 
 ```
 Client sends { method: "get", path: "https://example.com", run: "myrun" }
-  → buildRunContext(hooks, ctx, "myrun")
-  → dispatchTool(hooks, rummy, "get", path, "", { path })
-    → hooks.tools.dispatch("get", entry, rummy)
-      → Priority 5: RummyWeb#handleGet detects URL, fetches, upserts
-      → Priority 10: Core handler (skipped)
-  → RPC response: { status: "ok" }
+  → RPC dispatch → Repository
+  → hooks.tools.dispatch("get", entry, rummy)
+    → Priority 5: RummyWeb#handleGet
+    → Priority 10: Core handler
+  → Response
 ```
-
-Both paths use the same dispatch chain.
 
 ## WebFetcher Architecture
 
-### Lazy Browser Singleton
+### Persistent Browser Context
 
 ```javascript
 #browser = null;
+#context = null;
 #launching = null;
-
-async #getBrowser() {
-    if (this.#browser) return this.#browser;
-    if (this.#launching) return this.#launching;
-    this.#launching = (async () => {
-        const { chromium } = await import("playwright");
-        this.#browser = await chromium.launch({ headless: true });
-        return this.#browser;
-    })();
-    return this.#launching;
-}
+#idleTimer = null;
 ```
 
-Playwright startup is ~2s. Lazy initialization means no overhead if web tools are never used. The `#launching` promise prevents concurrent browser launches.
+Single browser instance with a persistent context shared across all fetches. Benefits: warm DNS cache, connection reuse, shared cookies. The browser shuts down after 15 minutes of inactivity via idle timer.
 
-### Fetch Pipeline
+### `fetch(url, opts?)`
+
+Opens a tab in the persistent context, navigates, runs Readability, converts to markdown, closes the tab. Options: `timeout` (default `FETCH_TIMEOUT`), `waitUntil` (default `"networkidle"`).
+
+### `fetchAll(urls, opts?)`
+
+Opens concurrent tabs in the shared context. Returns `Promise.allSettled`. Each page logs fetch time and content size. Default timeout: 5s (aggressive — for prefetch where snippet fallback exists).
+
+### `#extract(url, page, response)`
+
+Shared extraction logic: HTTP status check → inject Readability.js → `page.evaluate()` → Turndown conversion. Returns the standard result object.
+
+### Search Backends
+
+**SearXNG** (`RUMMY_SEARCH=searxng`):
+```
+GET /search?q=...&format=json&language=en
+→ { results: [{ title, url, content, engine }] }
+```
+
+**Brave** (`RUMMY_SEARCH=brave`):
+```
+GET https://api.search.brave.com/res/v1/web/search?q=...&count=N
+Headers: X-Subscription-Token, Accept: application/json
+→ { web: { results: [{ title, url, description }] } }
+```
+
+Both normalize to `[{ title, url, snippet, engine }]`.
+
+### Wikipedia Optimization
+
+URLs matching `*.wikipedia.org/wiki/*` are rewritten to the mobile-html API:
 
 ```
-URL → cleanUrl() → Playwright page.goto() → page.content()
-  → JSDOM parse → Readability extract → Turndown to markdown
+https://en.wikipedia.org/wiki/Foo
+→ https://en.wikipedia.org/api/rest_v1/page/mobile-html/Foo
 ```
 
-Each fetch creates a fresh browser context (isolated cookies/state), closed in `finally`.
+Returns pre-cleaned HTML without navigation, edit chrome, or reference clutter.
 
-### Search Pipeline
+### Mobile Device Emulation
 
-```
-query → SearXNG GET /search?q=...&format=json&language=en
-  → JSON response → slice to limit → map to { title, url, snippet, engine }
-```
-
-Uses global `fetch` with `AbortSignal.timeout(FETCH_TIMEOUT)`.
+All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x851 viewport, 2.75x device scale. Sites serving responsive content return lighter DOM.
 
 ### URL Cleaning
 
-`WebFetcher.cleanUrl(raw)` strips query params, hash fragments, and trailing slashes:
-
-1. **Cache deduplication**: `?utm_source=x` and `#section` are transient; same content shouldn't be fetched twice.
-2. **Path canonicalization**: entries keyed by clean URL are reliably addressable.
+`WebFetcher.cleanUrl(raw)` strips query params, hash fragments, and trailing slashes for path canonicalization and cache deduplication.
 
 ### Error Handling
 
 | Scenario | Behavior |
 |---|---|
-| `RUMMY_SEARXNG_URL` not set | `search()` throws `Error("RUMMY_SEARXNG_URL not configured")` |
-| SearXNG returns non-200 | `search()` throws with status code |
+| `RUMMY_SEARXNG_URL` not set | `search()` throws |
+| `BRAVE_API_KEY` not set | `search()` throws |
+| Search backend returns non-200 | `search()` throws with status |
+| Page returns 4xx/5xx | `fetch()` returns `{ error: "HTTP 404" }` |
 | Page load timeout | `fetch()` returns `{ error: message }` |
 | Readability parse fails | `fetch()` returns first 5000 chars of raw HTML |
-| Fetch error in handler | Warning logged, handler returns (chain continues) |
-
-## Materialization Flow
-
-How web entries reach the model:
-
-1. `TurnExecutor` writes `instructions://system`.
-2. `instructions.toolDocs` filters run. RummyWeb's filter appends `SEARCH_DOCS`.
-3. `InstructionsPlugin` renders the system prompt with interpolated tool descriptions.
-4. `v_model_context` VIEW selects visible entries. Web entries categorize as:
-   - `data` (http/https — persistent content the model carries)
-   - `logging` (search — records of search operations)
-5. `ContextAssembler` places data-category entries in `<knowns>` (system message) and logging-category entries in `<current>`/`<previous>` (user message).
+| Fetch error in handler | Warning logged, handler returns |
 
 ## Design Decisions
 
-### Web entries as scheme-based K/V
+### Prefetch on search
 
-Fetched pages use `http://` and `https://` schemes in the same K/V store as files and knowledge. Unified state transitions, consistent visibility rules, deduplication by path, and model transparency — URLs appear alongside files in context.
+Search results are prefetched concurrently so the model sees real token counts at demoted fidelity. Without prefetching, the model sees snippet tokens (~140) not page tokens (~20K), making context budget decisions impossible.
 
-### Priority 5 for URL interception
+### Demoted fidelity for search results
 
-The get handler registers at priority 5, before the core get handler at 10. URL detection is scheme-specific and non-contentious. Early exit prevents unnecessary filesystem operations.
+Prefetched pages store at `demoted` fidelity — the model sees paths and token counts in `<knowns>` but not the body. This prevents 12 full articles from flooding context. The model promotes individual results via `<get>` when it needs the content.
 
-### Search results as separate entries
+### Prefetch deference on `<get>`
 
-Each search creates one `search://` metadata entry plus individual `http(s)://` entries at `summary` state. Individual entries are deduplicatable and independently fetchable. Each carries the originating query in attributes.
+If `<get>` targets a URL that was already prefetched (`prefetched: true` in attributes), the web handler returns immediately and lets the core get handler promote it. No redundant fetch.
 
-### Lazy browser initialization
+### Web entries as `data` category
 
-Playwright browser launches on first fetch, not at plugin construction. Most agent sessions never use web tools, so this avoids ~2s startup overhead. The singleton pattern with `#launching` promise prevents concurrent launches.
+Fetched pages register as `data` category (alongside files and knowledge), not `logging`. They're persistent content the model carries and reasons about, not ephemeral operation records.
 
-### Attributes for metadata, body for content
+### Persistent browser context
 
-Fetch metadata (`title`, `byline`, `excerpt`, `siteName`) lives in `entry.attributes`; the body is pure markdown content. Attributes are invisible to the model unless a view function surfaces them.
+Single browser context shared across all fetches within a session. Warm DNS, connection reuse, and shared state. 15-minute idle timeout prevents resource leaks.
 
-### Cross-scheme registration via core.hooks
+### Wikipedia mobile-html redirect
 
-This plugin registers handlers and views on schemes it doesn't own (`search`, `get`, `http`, `https`). `core.on()` scopes to `core.name` (`"web"`), so cross-scheme work goes through `core.hooks.tools` directly — the same pattern used by the core `file` plugin.
+Wikipedia's standard pages have deeply interleaved content and metadata that Readability can't fully separate. The mobile-html API returns pre-cleaned content — a site-specific optimization that eliminates ~40% of noise.
+
+### Mobile device emulation
+
+Pixel 5 profile reduces page weight for all sites serving responsive content. Sites using CSS media queries or user agent detection serve lighter DOM, fewer scripts, and simpler layouts.
+
+### Configurable search backends
+
+SearXNG (self-hosted, private) and Brave Search API (hosted, API key) both normalize to the same result shape. Backend selection via `RUMMY_SEARCH` env var.
 
 ## Timeout Cascade
 
 ```
 RUMMY_FETCH_TIMEOUT (default 15000 ms)
-  ├ WebFetcher.fetch()   — page.goto({ timeout: FETCH_TIMEOUT })
-  └ WebFetcher.search()  — fetch({ signal: AbortSignal.timeout(FETCH_TIMEOUT) })
+  ├ WebFetcher.fetch()     — page.goto({ timeout })
+  ├ WebFetcher.search()    — fetch({ signal: AbortSignal.timeout() })
+  └ WebFetcher.fetchAll()  — default 5000ms per page (overridable)
 ```
 
 ## File Structure
@@ -372,15 +413,14 @@ RUMMY_FETCH_TIMEOUT (default 15000 ms)
 ```
 src/
 ├── web.js              — RummyWeb class (plugin entry point)
-├── WebFetcher.js       — Playwright fetch + SearXNG search
-└── WebFetcher.test.js  — Unit tests (cleanUrl)
+├── WebFetcher.js       — Playwright fetch + search backends
+└── WebFetcher.test.js  — Unit + live integration tests
 ```
 
 ## Dependencies
 
 | Package | Purpose |
 |---|---|
-| `playwright` | Headless Chromium browser automation |
-| `@mozilla/readability` | Article content extraction from HTML |
-| `jsdom` | DOM parsing for Readability |
+| `playwright` | Headless Chromium browser automation + device emulation |
+| `@mozilla/readability` | Article content extraction (injected into page via addScriptTag) |
 | `turndown` | HTML to Markdown conversion |

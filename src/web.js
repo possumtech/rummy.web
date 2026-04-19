@@ -52,8 +52,13 @@ export default class RummyWeb {
 		// shared DNS/cache/connections; 5s timeout per page, snippet fallback.
 		const fetcher = this.#getFetcher();
 		const urls = results.map((r) => WebFetcher.cleanUrl(r.url));
+		const fetchStart = Date.now();
 		const pages = await fetcher.fetchAll(urls, { timeout: 5000 });
+		console.log(
+			`[RUMMY] Prefetched ${urls.length} pages in ${((Date.now() - fetchStart) / 1000).toFixed(1)}s`,
+		);
 
+		const successUrls = [];
 		for (let i = 0; i < results.length; i++) {
 			const r = results[i];
 			const url = urls[i];
@@ -61,34 +66,33 @@ export default class RummyWeb {
 			const fetched = page.status === "fulfilled" ? page.value : null;
 			const fetchOk = fetched && !fetched.error;
 
-			const header = fetchOk && fetched.title ? `# ${fetched.title}\n\n` : "";
-			const body = fetchOk
-				? header + (fetched.content || "")
-				: `${r.title}\n${r.snippet}`;
+			if (!fetchOk) continue;
 
+			successUrls.push(url);
+			const header = fetched.title ? `# ${fetched.title}\n\n` : "";
 			await rummy.set({
 				path: url,
-				body,
-				status: fetchOk ? 200 : 408,
+				body: header + (fetched.content || ""),
+				state: "resolved",
 				fidelity: "demoted",
 				attributes: {
 					query,
 					engine: r.engine,
-					title: fetchOk ? fetched.title || r.title : r.title,
+					title: fetched.title || r.title,
 					snippet: r.snippet,
-					excerpt: fetchOk ? fetched.excerpt : null,
-					byline: fetchOk ? fetched.byline : null,
-					siteName: fetchOk ? fetched.siteName : null,
-					prefetched: fetchOk,
+					excerpt: fetched.excerpt,
+					byline: fetched.byline,
+					siteName: fetched.siteName,
+					prefetched: true,
 				},
 			});
 		}
 
-		const listing = urls.join("\n");
+		const listing = successUrls.join("\n");
 		await rummy.set({
 			path: entry.resultPath,
-			body: `${results.length} results for "${query}"\n${listing}`,
-			status: 200,
+			body: `${successUrls.length} results for "${query}"\n${listing}`,
+			state: "resolved",
 		});
 	}
 
@@ -99,26 +103,19 @@ export default class RummyWeb {
 
 		const clean = WebFetcher.cleanUrl(target);
 
-		// If search already prefetched this page, just promote it.
-		const existing = await rummy.getEntry(clean);
-		if (existing?.attributes) {
-			const attrs =
-				typeof existing.attributes === "string"
-					? JSON.parse(existing.attributes)
-					: existing.attributes;
-			if (attrs?.prefetched) {
-				await rummy.set({
-					path: clean,
-					body: existing.body,
-					status: 200,
-					fidelity: "promoted",
-				});
-				return;
-			}
-		}
+		// If search already prefetched this page, the content is already
+		// in the entry — just let the core get handler promote it.
+		const existing = await rummy.getAttributes(clean);
+		if (existing?.prefetched) return;
 
 		// Not prefetched (direct <get> on a URL) — fetch now.
-		const fetched = await this.#getFetcher().fetch(clean);
+		let fetched;
+		try {
+			fetched = await this.#getFetcher().fetch(clean);
+		} catch (err) {
+			console.warn(`[RUMMY] Fetch crashed: ${clean} — ${err.message}`);
+			return;
+		}
 		if (fetched.error) {
 			console.warn(`[RUMMY] Fetch failed: ${clean} — ${fetched.error}`);
 			return;
@@ -128,7 +125,7 @@ export default class RummyWeb {
 		await rummy.set({
 			path: clean,
 			body: header + (fetched.content || ""),
-			status: 200,
+			state: "resolved",
 			attributes: {
 				title: fetched.title,
 				excerpt: fetched.excerpt,

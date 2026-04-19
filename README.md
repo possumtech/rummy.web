@@ -1,6 +1,6 @@
 # @possumtech/rummy.web
 
-Web search and fetch plugin for [rummy](https://github.com/possumtech/rummy). Adds `<search>` and URL-aware `<get>` tools powered by Playwright, Mozilla Readability, and SearXNG.
+Web search and fetch plugin for [rummy](https://github.com/possumtech/rummy). Adds `<search>` and URL-aware `<get>` tools powered by Playwright, Mozilla Readability, and configurable search backends (SearXNG or Brave).
 
 ## Install
 
@@ -17,29 +17,37 @@ Load via environment variable:
 RUMMY_PLUGIN_WEB=@possumtech/rummy.web
 ```
 
-The plugin loader imports the package, derives the name `"web"`, and calls `new RummyWeb(core)` with a `PluginContext`. Graceful failure if not installed.
+### Search Backend
 
-### SearXNG
+SearXNG (default):
 
-The `<search>` tool requires a running [SearXNG](https://github.com/searxng/searxng) instance:
+```env
+RUMMY_SEARCH=searxng
+RUMMY_SEARXNG_URL=http://127.0.0.1:8888
+```
 
-```sh
-docker run -d -p 8888:8080 searxng/searxng
+Brave Search API:
+
+```env
+RUMMY_SEARCH=brave
+BRAVE_API_KEY=your-api-key
 ```
 
 ### Environment Variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `RUMMY_PLUGIN_WEB` | Yes | — | Set to `@possumtech/rummy.web` to load the plugin |
-| `RUMMY_SEARXNG_URL` | Yes (for search) | — | SearXNG base URL (e.g. `http://127.0.0.1:8888`) |
+| `RUMMY_PLUGIN_WEB` | Yes | — | Set to `@possumtech/rummy.web` to load |
+| `RUMMY_SEARCH` | No | `searxng` | Search backend: `searxng` or `brave` |
+| `RUMMY_SEARXNG_URL` | If searxng | — | SearXNG base URL |
+| `BRAVE_API_KEY` | If brave | — | Brave Search API key |
 | `RUMMY_FETCH_TIMEOUT` | No | `15000` | Timeout in ms for page loads and search requests |
 
 ## Tools
 
 ### `<search>` — Web Search
 
-Queries SearXNG and creates URL entries from results.
+Queries the configured search backend and prefetches all result pages concurrently.
 
 ```xml
 <search>node.js streams backpressure</search>
@@ -47,25 +55,27 @@ Queries SearXNG and creates URL entries from results.
 ```
 
 - Results default to 12; set the `results` attribute to limit.
-- Each result is stored as an `https://` entry at `summary` state with `title + snippet` body.
-- A `search://` result entry is created at `info` state with the URL listing.
-- Use `<get>` on a result URL to fetch the full page.
+- All result pages are prefetched in parallel (5s timeout per page, shared browser context).
+- Each result is stored as an `https://` entry at `demoted` fidelity with the full page content — the model sees token counts but not the body until promoted.
+- Failed prefetches are dropped from results.
+- Use `<get>` on a result URL to promote it to full fidelity.
 
 ### `<get>` — URL Fetch
 
-When `<get>` targets an `http://` or `https://` URL, this plugin intercepts at priority 5 (before the core get handler at 10), fetches the page with headless Chromium, extracts readable content via Mozilla Readability, and converts it to markdown via Turndown.
+When `<get>` targets an `http://` or `https://` URL, this plugin intercepts at priority 5 (before the core get handler at 10).
 
 ```xml
-<get>https://docs.example.com/api</get>
+<get>https://en.wikipedia.org/wiki/Mitch_Hedberg</get>
 ```
 
-- Content is stored as a `full` entry with `title`, `excerpt`, `byline`, and `siteName` attributes.
-- Already-fetched URLs are skipped (deduplication by path).
-- If Readability fails to parse, falls back to the first 5000 chars of raw HTML.
+- If the URL was prefetched by `<search>`, the core get handler promotes it — no refetch needed.
+- Otherwise, fetches the page with headless Chromium, extracts content via Readability, converts to markdown via Turndown.
+- Wikipedia URLs are automatically redirected to the mobile-html API for cleaner content.
+- All fetches use mobile device emulation (Pixel 5) for lighter page responses.
 
 ## Programmatic Access
 
-`WebFetcher` is available as a standalone export for use outside the plugin system:
+`WebFetcher` is available as a standalone export:
 
 ```javascript
 import WebFetcher from "@possumtech/rummy.web/fetcher";
@@ -75,13 +85,14 @@ const fetcher = new WebFetcher();
 const page = await fetcher.fetch("https://example.com");
 console.log(page.title, page.content);
 
+const pages = await fetcher.fetchAll(["https://a.com", "https://b.com"], { timeout: 5000 });
+
 const results = await fetcher.search("query");
-console.log(results);
 
 await fetcher.close();
 ```
 
-### `WebFetcher.fetch(url)` Response
+### `WebFetcher.fetch(url, opts?)` Response
 
 ```javascript
 { url, title, content, excerpt, byline, siteName }
@@ -89,7 +100,11 @@ await fetcher.close();
 { url, title: null, content: null, error: "message" }
 ```
 
-### `WebFetcher.search(query, opts)` Response
+### `WebFetcher.fetchAll(urls, opts?)` Response
+
+Returns `Promise.allSettled` — array of `{ status, value }` objects, each value matching the `fetch` response shape.
+
+### `WebFetcher.search(query, opts?)` Response
 
 ```javascript
 [{ title, url, snippet, engine }]
@@ -97,7 +112,7 @@ await fetcher.close();
 
 ### `WebFetcher.cleanUrl(raw)`
 
-Static method. Strips query params, hash fragments, and trailing slashes for path canonicalization and cache deduplication.
+Static. Strips query params, hash fragments, and trailing slashes.
 
 ## License
 

@@ -103,14 +103,25 @@ export default class WebFetcher {
 			urls.map(async (rawUrl) => {
 				const url = WebFetcher.cleanUrl(rawUrl);
 				const fetchUrl = toWikiMobileUrl(url) || url;
+				const start = Date.now();
 				const page = await context.newPage();
 				try {
 					const response = await page.goto(fetchUrl, {
 						waitUntil: "networkidle",
 						timeout,
 					});
-					return await this.#extract(url, page, response);
+					const result = await this.#extract(url, page, response);
+					const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+					const size = result.content?.length ?? 0;
+					console.log(
+						`[RUMMY] Fetched ${url} (${elapsed}s, ${size} chars${result.error ? `, error: ${result.error}` : ""})`,
+					);
+					return result;
 				} catch (err) {
+					const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+					console.log(
+						`[RUMMY] Fetch timeout ${url} (${elapsed}s: ${err.message})`,
+					);
 					return { url, title: null, content: null, error: err.message };
 				} finally {
 					await page.close();
