@@ -1,10 +1,13 @@
 import WebFetcher from "./WebFetcher.js";
 
+const MAX_SEARCHES_PER_TURN = Number(process.env.RUMMY_WEB_SEARCH_MAX);
+
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
 * Results are titles and snippets at "demoted" fidelity.
-* Use <get>https://example.com/page</get> on a result URL to fetch the full page (promoted).`;
+* Use <get>https://example.com/page</get> on a result URL to fetch the full page (promoted).
+* Hard-capped at ${MAX_SEARCHES_PER_TURN} <search> commands per turn; further searches in the same turn are refused.`;
 
 export default class RummyWeb {
 	#core;
@@ -43,6 +46,26 @@ export default class RummyWeb {
 		const attrs = entry.attributes || {};
 		const query = attrs.path || entry.body;
 		if (!query) return;
+
+		// Per-turn search cap. Searches are expensive (each prefetches
+		// multiple pages) so they're throttled individually while the
+		// overall command cap stays generous for cheap verbs like set/get/rm.
+		const priorSearches = await rummy.getEntries(
+			`search://turn_${rummy.sequence}/*`,
+			null,
+		);
+		if (priorSearches.length >= MAX_SEARCHES_PER_TURN) {
+			await rummy.entries.set({
+				runId: rummy.runId,
+				turn: rummy.sequence,
+				path: entry.resultPath,
+				body: `Refused: <search> is capped at ${MAX_SEARCHES_PER_TURN} per turn; this is search ${priorSearches.length + 1}. Act on the results you already have, or wait until next turn.`,
+				state: "failed",
+				outcome: "rate_limited",
+				loopId: rummy.loopId,
+			});
+			return;
+		}
 
 		const limit = attrs.results || 12;
 		const results = await this.#getFetcher().search(query, { limit });

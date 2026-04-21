@@ -9,10 +9,10 @@ const turndown = new TurndownService({
 	codeBlockStyle: "fenced",
 });
 
-const FETCH_TIMEOUT = Number(process.env.RUMMY_FETCH_TIMEOUT) || 15000;
+const FETCH_TIMEOUT = Number(process.env.RUMMY_FETCH_TIMEOUT);
 const IDLE_TIMEOUT = 15 * 60 * 1000; // 15 minutes
-const SEARCH_BACKEND = process.env.RUMMY_SEARCH || "searxng";
-const BRAVE_API_KEY = process.env.BRAVE_API_KEY || "";
+const SEARCH_BACKEND = process.env.RUMMY_SEARCH;
+const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
 
 // https://en.wikipedia.org/wiki/Foo → mobile-html API for clean content
 const WIKI_PATTERN = /^(https?:\/\/[a-z]+\.wikipedia\.org)\/wiki\/(.+)$/;
