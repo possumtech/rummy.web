@@ -47,8 +47,8 @@ core.registerScheme({
 | Event | Payload | Purpose |
 |---|---|---|
 | `"handler"` | `(entry, rummy)` | Tool handler — scoped to `core.name` |
-| `"promoted"` | `(entry)` | Promoted-fidelity projection |
-| `"demoted"` | `(entry)` | Demoted-fidelity projection |
+| `"visible"` | `(entry)` | Visible projection — full body shown |
+| `"summarized"` | `(entry)` | Summarized projection — compact view, body hidden |
 | `"turn.started"` | `({rummy, mode, prompt, ...})` | Turn beginning |
 | `"turn.response"` | `({rummy, turn, result, ...})` | LLM responded |
 | `"turn.proposing"` | `({rummy, recorded})` | Tool dispatched |
@@ -69,13 +69,13 @@ core.registerScheme({
 
 ### Cross-Scheme Registration
 
-`core.on("handler")` and `core.on("promoted")` register against `core.name`. To register handlers or views on schemes this plugin doesn't own, use `core.hooks` directly:
+`core.on("handler")` and `core.on("visible")` register against `core.name`. To register handlers or views on schemes this plugin doesn't own, use `core.hooks` directly:
 
 ```javascript
 hooks.tools.ensureTool("search");
 hooks.tools.onHandle("search", handler);
-hooks.tools.onView("search", viewFn, "promoted");
-hooks.tools.onView("https", viewFn);
+hooks.tools.onView("search", viewFn, "visible");
+hooks.tools.onView("https", viewFn, "summarized");
 hooks.tools.onHandle("get", handler, 5);
 ```
 
@@ -87,8 +87,8 @@ Passed to handlers as the second argument. Per-turn scope.
 
 | Method | Effect |
 |---|---|
-| `rummy.set({ path?, body?, state?, fidelity?, outcome?, attributes? })` | Create/update entry. State defaults to `"resolved"`. |
-| `rummy.get(path)` | Promote entries matching pattern |
+| `rummy.set({ path?, body?, state?, visibility?, outcome?, attributes? })` | Create/update entry. State defaults to `"resolved"`. |
+| `rummy.get(path)` | Promote entries matching pattern to `visible` |
 | `rummy.rm(path)` | Remove entry |
 | `rummy.mv(from, to)` | Rename entry |
 | `rummy.cp(from, to)` | Copy entry |
@@ -115,6 +115,7 @@ Passed to handlers as the second argument. Per-turn scope.
 | `rummy.runId` | Number | Current run ID |
 | `rummy.projectId` | Number | Current project ID |
 | `rummy.sequence` | Number | Current turn number |
+| `rummy.loopId` | Number | Current loop ID |
 | `rummy.type` | `"ask"` \| `"act"` | Current mode |
 | `rummy.writer` | String | Default `"model"` in handler dispatch |
 | `rummy.noWeb` | Boolean | Loop flag — web tools disabled |
@@ -133,12 +134,12 @@ Web-relevant schemes registered by this plugin:
 | `https` | `data` | Fetched web page content |
 | `search` | `logging` | Search operation results |
 
-### Fidelity
+### Visibility
 
-| Fidelity | Model Sees |
+| Visibility | Model Sees |
 |---|---|
-| `promoted` | Full body content in `<knowns>` |
-| `demoted` | Path + token count + `attributes.summary` only |
+| `visible` | Full body content in `<knowns>` / `<performed>` |
+| `summarized` | Path + token count + summary projection only |
 
 ### Entry States
 
@@ -147,12 +148,12 @@ Web-relevant schemes registered by this plugin:
 | `resolved` | Operation completed successfully |
 | `proposed` | Awaiting client resolution |
 | `streaming` | In progress |
-| `failed` | Operation failed |
+| `failed` | Operation failed (outcome carries detail, e.g. `429:rate_limited`) |
 | `cancelled` | Operation cancelled |
 
 ### Entry Attributes
 
-**Prefetched search results** (`https://` at `demoted`):
+**Prefetched search results** (`https://` at `summarized`):
 ```json
 {
     "query": "the search query",
@@ -166,7 +167,7 @@ Web-relevant schemes registered by this plugin:
 }
 ```
 
-**Directly fetched URLs** (`https://` at `promoted`):
+**Directly fetched URLs** (`https://` at `visible`):
 ```json
 {
     "title": "Page Title",
@@ -188,12 +189,13 @@ constructor(core) {
     core.registerScheme({ name: "http", category: "data" });
     core.registerScheme({ name: "https", category: "data" });
     hooks.tools.onHandle("search", this.#handleSearch.bind(this));
-    hooks.tools.onView("search", this.#viewSearch.bind(this), "promoted");
+    hooks.tools.onView("search", this.#viewSearch.bind(this), "visible");
+    hooks.tools.onView("search", this.#summarySearch, "summarized");
 
-    hooks.tools.onView("http", (entry) => entry.body);
-    hooks.tools.onView("http", this.#summaryUrl, "demoted");
-    hooks.tools.onView("https", (entry) => entry.body);
-    hooks.tools.onView("https", this.#summaryUrl, "demoted");
+    hooks.tools.onView("http", (entry) => entry.body, "visible");
+    hooks.tools.onView("http", this.#summaryUrl, "summarized");
+    hooks.tools.onView("https", (entry) => entry.body, "visible");
+    hooks.tools.onView("https", this.#summaryUrl, "summarized");
 
     hooks.tools.onHandle("get", this.#handleGet.bind(this), 5);
 
@@ -209,34 +211,37 @@ All registration is cross-scheme (`core.name` is `"web"`, but it registers on `s
 ### Handler: `search` (default priority)
 
 1. Extract query from `attrs.path` or `entry.body`.
-2. Query configured search backend (SearXNG or Brave).
-3. Prefetch all result pages concurrently via `fetcher.fetchAll(urls, { timeout: 5000 })`.
-4. For each successful fetch, store an `https://` entry at `demoted` fidelity with full page content and `{ query, engine, title, snippet, excerpt, byline, siteName, prefetched: true }` attributes.
-5. Failed prefetches are dropped from results.
-6. Store result listing at `entry.resultPath` with state `"resolved"`.
+2. Check per-turn search cap (`RUMMY_WEB_SEARCH_MAX`). If exceeded, write a `failed` entry with outcome `429:rate_limited` and return.
+3. Query configured search backend (SearXNG or Brave).
+4. Prefetch all result pages concurrently via `fetcher.fetchAll(urls, { timeout: 5000 })`.
+5. For each successful fetch, store an `https://` entry at `summarized` visibility with full page content and `{ query, engine, title, snippet, excerpt, byline, siteName, prefetched: true }` attributes.
+6. Failed prefetches are dropped from results.
+7. Store result listing at `entry.resultPath` with state `"resolved"`.
 
 ### Handler: `get` (priority 5)
 
 Priority 5 runs before the core get handler at priority 10.
 
 1. Check `attrs.path` matches `/^https?:\/\//`. If not, return (pass to next handler).
-2. If the entry has `prefetched: true` in attributes, return — let the core get handler promote the existing entry.
+2. If the entry has `prefetched: true` in attributes, return — let the core get handler promote it to `visible`.
 3. Otherwise, fetch the page via `WebFetcher.fetch()`.
 4. On error: log warning, return.
 5. On success: store at state `"resolved"` with markdown body and metadata attributes.
 
 ### Views
 
-**Promoted** (`http`/`https`): pass-through `entry.body` — the full markdown content.
+**Visible** (`http`/`https`): pass-through `entry.body` — the full markdown content.
 
-**Demoted** (`http`/`https`): compact card from attributes:
+**Summarized** (`http`/`https`): compact card from attributes:
 ```
 ## Page Title
 siteName — Author
 Excerpt or search snippet
 ```
 
-**Promoted** (`search`): `# search "query"\n{url listing}`
+**Visible** (`search`): `# search "query"\n{url listing}`
+
+**Summarized** (`search`): the query string only.
 
 ### Doc Injection
 
@@ -254,7 +259,7 @@ Uses the docsMap pattern — the instructions plugin filters by active tool set 
 ```
 Dispatch "get" for https://example.com (prefetched)
   Priority 5:  RummyWeb#handleGet — prefetched=true, returns
-  Priority 10: Core Get#handler — promotes entry to promoted fidelity
+  Priority 10: Core Get#handler — promotes entry to visible
 
 Dispatch "get" for https://example.com (not prefetched)
   Priority 5:  RummyWeb#handleGet — fetches page, stores entry
@@ -275,8 +280,9 @@ Model emits <search>query</search>
   → TurnExecutor records search:// entry
   → hooks.tools.dispatch("search", entry, rummy)
     → RummyWeb#handleSearch fires
+    → Checks per-turn search cap
     → Prefetches all result pages via fetchAll()
-    → Creates https:// entries at demoted fidelity
+    → Creates https:// entries at summarized visibility
     → Stores result listing at entry.resultPath
   → hooks.entry.created.emit(entry)
 ```
@@ -296,13 +302,6 @@ Client sends { method: "get", path: "https://example.com", run: "myrun" }
 
 ### Persistent Browser Context
 
-```javascript
-#browser = null;
-#context = null;
-#launching = null;
-#idleTimer = null;
-```
-
 Single browser instance with a persistent context shared across all fetches. Benefits: warm DNS cache, connection reuse, shared cookies. The browser shuts down after 15 minutes of inactivity via idle timer.
 
 ### `fetch(url, opts?)`
@@ -315,7 +314,7 @@ Opens concurrent tabs in the shared context. Returns `Promise.allSettled`. Each 
 
 ### `#extract(url, page, response)`
 
-Shared extraction logic: HTTP status check → inject Readability.js → `page.evaluate()` → Turndown conversion. Returns the standard result object.
+Shared extraction logic: HTTP status check → inject Readability.js → `page.evaluate()` → Turndown conversion.
 
 ### Search Backends
 
@@ -343,15 +342,13 @@ https://en.wikipedia.org/wiki/Foo
 → https://en.wikipedia.org/api/rest_v1/page/mobile-html/Foo
 ```
 
-Returns pre-cleaned HTML without navigation, edit chrome, or reference clutter.
-
 ### Mobile Device Emulation
 
-All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x851 viewport, 2.75x device scale. Sites serving responsive content return lighter DOM.
+All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x851 viewport, 2.75x device scale.
 
 ### URL Cleaning
 
-`WebFetcher.cleanUrl(raw)` strips query params, hash fragments, and trailing slashes for path canonicalization and cache deduplication.
+`WebFetcher.cleanUrl(raw)` strips query params, hash fragments, and trailing slashes.
 
 ### Error Handling
 
@@ -364,20 +361,25 @@ All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x8
 | Page load timeout | `fetch()` returns `{ error: message }` |
 | Readability parse fails | `fetch()` returns first 5000 chars of raw HTML |
 | Fetch error in handler | Warning logged, handler returns |
+| Per-turn search cap exceeded | `failed` entry with outcome `429:rate_limited` |
 
 ## Design Decisions
 
 ### Prefetch on search
 
-Search results are prefetched concurrently so the model sees real token counts at demoted fidelity. Without prefetching, the model sees snippet tokens (~140) not page tokens (~20K), making context budget decisions impossible.
+Search results are prefetched concurrently so the model sees real token counts at summarized visibility. Without prefetching, the model sees snippet tokens (~140) not page tokens (~20K), making context budget decisions impossible.
 
-### Demoted fidelity for search results
+### Summarized visibility for search results
 
-Prefetched pages store at `demoted` fidelity — the model sees paths and token counts in `<knowns>` but not the body. This prevents 12 full articles from flooding context. The model promotes individual results via `<get>` when it needs the content.
+Prefetched pages store at `summarized` visibility — the model sees paths and token counts but not the body. This prevents 12 full articles from flooding context. The model promotes individual results via `<get>` when it needs the content.
 
 ### Prefetch deference on `<get>`
 
-If `<get>` targets a URL that was already prefetched (`prefetched: true` in attributes), the web handler returns immediately and lets the core get handler promote it. No redundant fetch.
+If `<get>` targets a URL that was already prefetched (`prefetched: true` in attributes), the web handler returns immediately and lets the core get handler promote it to `visible`. No redundant fetch.
+
+### Per-turn search cap
+
+Searches are expensive (each prefetches multiple pages). `RUMMY_WEB_SEARCH_MAX` throttles searches per turn while the overall command cap stays generous for cheap verbs. Exceeding the cap produces a `failed` entry with outcome `429:rate_limited`.
 
 ### Web entries as `data` category
 
@@ -389,11 +391,11 @@ Single browser context shared across all fetches within a session. Warm DNS, con
 
 ### Wikipedia mobile-html redirect
 
-Wikipedia's standard pages have deeply interleaved content and metadata that Readability can't fully separate. The mobile-html API returns pre-cleaned content — a site-specific optimization that eliminates ~40% of noise.
+Wikipedia's standard pages have deeply interleaved content and metadata. The mobile-html API returns pre-cleaned content — eliminates ~40% of noise.
 
 ### Mobile device emulation
 
-Pixel 5 profile reduces page weight for all sites serving responsive content. Sites using CSS media queries or user agent detection serve lighter DOM, fewer scripts, and simpler layouts.
+Pixel 5 profile reduces page weight for sites serving responsive content.
 
 ### Configurable search backends
 

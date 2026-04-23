@@ -5,8 +5,8 @@ const MAX_SEARCHES_PER_TURN = Number(process.env.RUMMY_WEB_SEARCH_MAX);
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
-* Results are titles and snippets at "demoted" fidelity.
-* Use <get>https://example.com/page</get> on a result URL to fetch the full page (promoted).
+* Results are titles and snippets at "summarized" visibility.
+* Use <get>https://example.com/page</get> on a result URL to fetch the full page (visible).
 * Hard-capped at ${MAX_SEARCHES_PER_TURN} <search> commands per turn; further searches in the same turn are refused.`;
 
 export default class RummyWeb {
@@ -22,12 +22,13 @@ export default class RummyWeb {
 		core.registerScheme({ name: "http", category: "data" });
 		core.registerScheme({ name: "https", category: "data" });
 		hooks.tools.onHandle("search", this.#handleSearch.bind(this));
-		hooks.tools.onView("search", this.#viewSearch.bind(this), "promoted");
+		hooks.tools.onView("search", this.#viewSearch.bind(this), "visible");
+		hooks.tools.onView("search", this.#summarySearch, "summarized");
 
-		hooks.tools.onView("http", (entry) => entry.body);
-		hooks.tools.onView("http", this.#summaryUrl, "demoted");
-		hooks.tools.onView("https", (entry) => entry.body);
-		hooks.tools.onView("https", this.#summaryUrl, "demoted");
+		hooks.tools.onView("http", (entry) => entry.body, "visible");
+		hooks.tools.onView("http", this.#summaryUrl, "summarized");
+		hooks.tools.onView("https", (entry) => entry.body, "visible");
+		hooks.tools.onView("https", this.#summaryUrl, "summarized");
 
 		hooks.tools.onHandle("get", this.#handleGet.bind(this), 5);
 
@@ -59,9 +60,13 @@ export default class RummyWeb {
 				runId: rummy.runId,
 				turn: rummy.sequence,
 				path: entry.resultPath,
-				body: `Refused: <search> is capped at ${MAX_SEARCHES_PER_TURN} per turn; this is search ${priorSearches.length + 1}. Act on the results you already have, or wait until next turn.`,
+				body: "Refused: search cap reached this turn.",
 				state: "failed",
-				outcome: "rate_limited",
+				// 429: the conventional rate-limit code. stateToStatus
+				// extracts it from outcome and renders as status="429"
+				// on the log tag, keeping this refusal consistent with
+				// other HTTP-coded failures (overflow:413, permission:403).
+				outcome: "429:rate_limited",
 				loopId: rummy.loopId,
 			});
 			return;
@@ -71,7 +76,7 @@ export default class RummyWeb {
 		const results = await this.#getFetcher().search(query, { limit });
 
 		// Prefetch all pages in a shared browser context so the model
-		// sees real token counts at demoted fidelity. Shared context =
+		// sees real token counts at summarized visibility. Shared context =
 		// shared DNS/cache/connections; 5s timeout per page, snippet fallback.
 		const fetcher = this.#getFetcher();
 		const urls = results.map((r) => WebFetcher.cleanUrl(r.url));
@@ -97,7 +102,7 @@ export default class RummyWeb {
 				path: url,
 				body: header + (fetched.content || ""),
 				state: "resolved",
-				fidelity: "demoted",
+				visibility: "summarized",
 				attributes: {
 					query,
 					engine: r.engine,
@@ -116,6 +121,7 @@ export default class RummyWeb {
 			path: entry.resultPath,
 			body: `${successUrls.length} results for "${query}"\n${listing}`,
 			state: "resolved",
+			attributes: { query },
 		});
 	}
 
@@ -170,7 +176,18 @@ export default class RummyWeb {
 	}
 
 	#viewSearch(entry) {
-		const attrs = entry.attributes || {};
-		return `# search "${attrs.path || ""}"\n${entry.body}`;
+		const attrs = parseAttrs(entry);
+		return `# search "${attrs.query || ""}"\n${entry.body}`;
 	}
+
+	#summarySearch(entry) {
+		return parseAttrs(entry).query || "";
+	}
+}
+
+function parseAttrs(entry) {
+	if (!entry.attributes) return {};
+	return typeof entry.attributes === "string"
+		? JSON.parse(entry.attributes)
+		: entry.attributes;
 }
