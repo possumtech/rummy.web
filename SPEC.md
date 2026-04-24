@@ -211,12 +211,13 @@ All registration is cross-scheme (`core.name` is `"web"`, but it registers on `s
 ### Handler: `search` (default priority)
 
 1. Extract query from `attrs.path` or `entry.body`.
-2. Check per-turn search cap (`RUMMY_WEB_SEARCH_MAX`). If exceeded, write a `failed` entry with outcome `429:rate_limited` and return.
+2. Check per-turn search cap (`RUMMY_WEB_SEARCH_MAX`). If exceeded, emit via `rummy.hooks.error.log.emit()` with status 429 and return.
 3. Query configured search backend (SearXNG or Brave).
 4. Prefetch all result pages concurrently via `fetcher.fetchAll(urls, { timeout: 5000 })`.
-5. For each successful fetch, store an `https://` entry at `summarized` visibility with full page content and `{ query, engine, title, snippet, excerpt, byline, siteName, prefetched: true }` attributes.
-6. Failed prefetches are dropped from results.
-7. Store result listing at `entry.resultPath` with state `"resolved"`.
+5. For each successful fetch, check if the URL is already `visible` (previously promoted via `<get>`) — if so, preserve that visibility. Otherwise store at `summarized`.
+6. Store each `https://` entry with full page content and `{ query, engine, title, snippet, excerpt, byline, siteName, prefetched: true }` attributes.
+7. Failed prefetches are dropped from results.
+8. Store result listing at `entry.resultPath` with state `"resolved"`.
 
 ### Handler: `get` (priority 5)
 
@@ -361,7 +362,7 @@ All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x8
 | Page load timeout | `fetch()` returns `{ error: message }` |
 | Readability parse fails | `fetch()` returns first 5000 chars of raw HTML |
 | Fetch error in handler | Warning logged, handler returns |
-| Per-turn search cap exceeded | `failed` entry with outcome `429:rate_limited` |
+| Per-turn search cap exceeded | Error logged via `hooks.error.log.emit()` with status 429 |
 
 ## Design Decisions
 
@@ -379,7 +380,11 @@ If `<get>` targets a URL that was already prefetched (`prefetched: true` in attr
 
 ### Per-turn search cap
 
-Searches are expensive (each prefetches multiple pages). `RUMMY_WEB_SEARCH_MAX` throttles searches per turn while the overall command cap stays generous for cheap verbs. Exceeding the cap produces a `failed` entry with outcome `429:rate_limited`.
+Searches are expensive (each prefetches multiple pages). `RUMMY_WEB_SEARCH_MAX` throttles searches per turn while the overall command cap stays generous for cheap verbs. Exceeding the cap emits an error via the `hooks.error.log` hook with status 429.
+
+### Visibility preservation on re-search
+
+If a URL was already promoted to `visible` (via `<get>`), a subsequent search returning the same URL preserves the `visible` visibility instead of clobbering it back to `summarized`. Without this, the model sees a page it just promoted as unreadable and re-emits the same search.
 
 ### Web entries as `data` category
 
@@ -404,11 +409,13 @@ SearXNG (self-hosted, private) and Brave Search API (hosted, API key) both norma
 ## Timeout Cascade
 
 ```
-RUMMY_FETCH_TIMEOUT (default 15000 ms)
+RUMMY_FETCH_TIMEOUT
   ├ WebFetcher.fetch()     — page.goto({ timeout })
   ├ WebFetcher.search()    — fetch({ signal: AbortSignal.timeout() })
   └ WebFetcher.fetchAll()  — default 5000ms per page (overridable)
 ```
+
+`RUMMY_FETCH_TIMEOUT` is read from the environment with no hardcoded default — the server is expected to set it.
 
 ## File Structure
 

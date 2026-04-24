@@ -41,7 +41,7 @@ BRAVE_API_KEY=your-api-key
 | `RUMMY_SEARCH` | No | `searxng` | Search backend: `searxng` or `brave` |
 | `RUMMY_SEARXNG_URL` | If searxng | — | SearXNG base URL |
 | `BRAVE_API_KEY` | If brave | — | Brave Search API key |
-| `RUMMY_FETCH_TIMEOUT` | No | `15000` | Timeout in ms for page loads and search requests |
+| `RUMMY_FETCH_TIMEOUT` | No | — | Timeout in ms for page loads and search requests |
 | `RUMMY_WEB_SEARCH_MAX` | No | — | Max `<search>` commands per turn |
 
 ## Tools
@@ -60,7 +60,8 @@ Queries the configured search backend and prefetches all result pages concurrent
 - Each result is stored as an `https://` entry at `summarized` visibility with the full page content — the model sees token counts but not the body until made visible.
 - Failed prefetches are dropped from results.
 - Use `<get>` on a result URL to promote it to `visible`.
-- Hard-capped at `RUMMY_WEB_SEARCH_MAX` searches per turn; further searches are refused with a `429:rate_limited` outcome.
+- Hard-capped at `RUMMY_WEB_SEARCH_MAX` searches per turn; further searches are refused (error logged with status 429).
+- Re-searching a URL that was already promoted via `<get>` preserves its `visible` visibility.
 
 ### `<get>` — URL Fetch
 

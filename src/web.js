@@ -1,13 +1,13 @@
 import WebFetcher from "./WebFetcher.js";
 
-const MAX_SEARCHES_PER_TURN = Number(process.env.RUMMY_WEB_SEARCH_MAX);
+const MAX_SEARCHES_PER_TURN = Number(process.env.RUMMY_WEB_SEARCH_MAX) || 1;
 
-const SEARCH_DOCS = `## <search>[query]</search> - Search the web
+const SEARCH_DOCS = `## <search>[query]</search> - Search the web (ONE per turn)
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
 * Results are titles and snippets at "summarized" visibility.
 * Use <get>https://example.com/page</get> on a result URL to fetch the full page (visible).
-* Hard-capped at ${MAX_SEARCHES_PER_TURN} <search> commands per turn; further searches in the same turn are refused.`;
+* **ONE \`<search>\` per turn.** Each call returns 5–12 candidate URLs. Additional searches the same turn are refused.`;
 
 export default class RummyWeb {
 	#core;
@@ -48,26 +48,20 @@ export default class RummyWeb {
 		const query = attrs.path || entry.body;
 		if (!query) return;
 
-		// Per-turn search cap. Searches are expensive (each prefetches
-		// multiple pages) so they're throttled individually while the
-		// overall command cap stays generous for cheap verbs like set/get/rm.
+		// Path pattern is the log namespace, not the pre-migration
+		// `search://` scheme — the old pattern silently never matched.
 		const priorSearches = await rummy.getEntries(
-			`search://turn_${rummy.sequence}/*`,
+			`log://turn_${rummy.sequence}/search/*`,
 			null,
 		);
 		if (priorSearches.length >= MAX_SEARCHES_PER_TURN) {
-			await rummy.entries.set({
+			await rummy.hooks.error.log.emit({
+				store: rummy.entries,
 				runId: rummy.runId,
 				turn: rummy.sequence,
-				path: entry.resultPath,
-				body: "Refused: search cap reached this turn.",
-				state: "failed",
-				// 429: the conventional rate-limit code. stateToStatus
-				// extracts it from outcome and renders as status="429"
-				// on the log tag, keeping this refusal consistent with
-				// other HTTP-coded failures (overflow:413, permission:403).
-				outcome: "429:rate_limited",
 				loopId: rummy.loopId,
+				message: `Only one <search> per turn. Dropped: "${query}". Each search returns 5–12 URLs; refine and re-emit next turn if needed.`,
+				status: 429,
 			});
 			return;
 		}
@@ -98,11 +92,18 @@ export default class RummyWeb {
 
 			successUrls.push(url);
 			const header = fetched.title ? `# ${fetched.title}\n\n` : "";
+			// Preserve existing visibility: if an earlier <get> already
+			// promoted this URL, a later search returning the same URL
+			// would otherwise clobber it back to "summarized" — the model
+			// then sees the page it just promoted as unreadable and
+			// re-emits the same search looking for something it can read.
+			const existing = await rummy.getEntries(url, null);
+			const keepVisible = existing[0]?.visibility === "visible";
 			await rummy.set({
 				path: url,
 				body: header + (fetched.content || ""),
 				state: "resolved",
-				visibility: "summarized",
+				visibility: keepVisible ? "visible" : "summarized",
 				attributes: {
 					query,
 					engine: r.engine,
