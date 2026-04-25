@@ -1,6 +1,6 @@
 {
 	"name": "@possumtech/rummy.web",
-	"version": "2.1.3",
+	"version": "2.2.0",
 	"description": "Web search and fetch plugin for rummy — Playwright browser automation and SearXNG search integration",
 	"keywords": [
 		"rummy",

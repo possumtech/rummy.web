@@ -4,10 +4,35 @@ import TurndownService from "turndown";
 const require = createRequire(import.meta.url);
 const READABILITY_PATH = require.resolve("@mozilla/readability/Readability.js");
 
+const WRAP_WIDTH = 80;
+
 const turndown = new TurndownService({
 	headingStyle: "atx",
 	codeBlockStyle: "fenced",
 });
+
+turndown.addRule("wrap-paragraphs", {
+	filter: "p",
+	replacement(content) {
+		return `\n\n${wrapText(content.trim(), WRAP_WIDTH)}\n\n`;
+	},
+});
+
+function wrapText(text, width) {
+	const words = text.split(/\s+/);
+	const lines = [];
+	let line = "";
+	for (const word of words) {
+		if (line && line.length + 1 + word.length > width) {
+			lines.push(line);
+			line = word;
+		} else {
+			line = line ? `${line} ${word}` : word;
+		}
+	}
+	if (line) lines.push(line);
+	return lines.join("\n");
+}
 
 const FETCH_TIMEOUT = Number(process.env.RUMMY_FETCH_TIMEOUT);
 const IDLE_TIMEOUT = 15 * 60 * 1000; // 15 minutes
