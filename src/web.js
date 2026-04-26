@@ -6,7 +6,7 @@ const SEARCH_DOCS = `## <search>[query]</search> - Search the web (ONE per turn)
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
 * Results are titles and snippets at "summarized" visibility.
-* Use <get>https://example.com/page</get> on a result URL to fetch the full page (visible).
+* Use <get path="https://example.com/page"/> on a result URL to fetch the full page (visible).
 * **ONE \`<search>\` per turn.** Each call returns 5–12 candidate URLs. Additional searches the same turn are refused.`;
 
 export default class RummyWeb {
@@ -47,6 +47,23 @@ export default class RummyWeb {
 		const attrs = entry.attributes || {};
 		const query = attrs.path || entry.body;
 		if (!query) return;
+
+		// Honor noWeb: ToolRegistry exclusions are cosmetic (docs hidden
+		// from the model) but dispatch still fires if the model emits
+		// <search> from a training prior. Bail with a clear refusal so the
+		// model gets feedback instead of a silent fetch that contradicts
+		// the run's contract.
+		if (rummy.noWeb) {
+			await rummy.hooks.error.log.emit({
+				store: rummy.entries,
+				runId: rummy.runId,
+				turn: rummy.sequence,
+				loopId: rummy.loopId,
+				message: `Web access disabled for this run. <search> refused: "${query}".`,
+				status: 403,
+			});
+			return;
+		}
 
 		// Path pattern is the log namespace, not the pre-migration
 		// `search://` scheme — the old pattern silently never matched.
@@ -137,6 +154,21 @@ export default class RummyWeb {
 		// in the entry — just let the core get handler promote it.
 		const existing = await rummy.getAttributes(clean);
 		if (existing?.prefetched) return;
+
+		// Honor noWeb on direct URL fetches too. Without this, a run with
+		// noWeb=true would still fetch the moment the model <get>s a URL
+		// it found in a session text or prior context.
+		if (rummy.noWeb) {
+			await rummy.hooks.error.log.emit({
+				store: rummy.entries,
+				runId: rummy.runId,
+				turn: rummy.sequence,
+				loopId: rummy.loopId,
+				message: `Web access disabled for this run. <get> on URL refused: ${clean}`,
+				status: 403,
+			});
+			return;
+		}
 
 		// Not prefetched (direct <get> on a URL) — fetch now.
 		let fetched;
