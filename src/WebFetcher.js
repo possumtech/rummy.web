@@ -11,6 +11,20 @@ const turndown = new TurndownService({
 	codeBlockStyle: "fenced",
 });
 
+// Encode parens in hrefs so markdown link syntax is unambiguous for the
+// word wrap tokenizer. Preserve title attributes as context grounding.
+turndown.addRule("safe-links", {
+	filter: "a",
+	replacement(content, node) {
+		const href = node.getAttribute("href");
+		if (!href) return content;
+		const safeHref = href.replace(/\(/g, "%28").replace(/\)/g, "%29");
+		const title = node.getAttribute("title");
+		if (title) return `[${content}](${safeHref} "${title}")`;
+		return `[${content}](${safeHref})`;
+	},
+});
+
 turndown.addRule("wrap-paragraphs", {
 	filter: "p",
 	replacement(content) {
@@ -18,16 +32,22 @@ turndown.addRule("wrap-paragraphs", {
 	},
 });
 
+// Markdown links, images, and inline code are atomic — never split mid-token.
+// Hrefs have parens encoded (%28/%29), so the only unescaped ) is the link closer.
+// Title strings: [text](url "title with spaces")
+const TOKEN_RE =
+	/!\[[^\]]*\]\([^)"]*(?:"[^"]*")?[^)]*\)|\[[^\]]*\]\([^)"]*(?:"[^"]*")?[^)]*\)|`[^`]+`|\S+/g;
+
 function wrapText(text, width) {
-	const words = text.split(/\s+/);
+	const tokens = text.match(TOKEN_RE) || [];
 	const lines = [];
 	let line = "";
-	for (const word of words) {
-		if (line && line.length + 1 + word.length > width) {
+	for (const token of tokens) {
+		if (line && line.length + 1 + token.length > width) {
 			lines.push(line);
-			line = word;
+			line = token;
 		} else {
-			line = line ? `${line} ${word}` : word;
+			line = line ? `${line} ${token}` : token;
 		}
 	}
 	if (line) lines.push(line);
