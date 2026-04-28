@@ -153,21 +153,8 @@ Web-relevant schemes registered by this plugin:
 
 ### Entry Attributes
 
-**Prefetched search results** (`https://` at `summarized`):
-```json
-{
-    "query": "the search query",
-    "engine": "brave",
-    "title": "Page Title",
-    "snippet": "Search result snippet",
-    "excerpt": "Readability excerpt",
-    "byline": "Author",
-    "siteName": "example.com",
-    "prefetched": true
-}
-```
+`https://` entries are created only by `<get>` (search no longer prefetches). The attribute set is:
 
-**Directly fetched URLs** (`https://` at `visible`):
 ```json
 {
     "title": "Page Title",
@@ -176,6 +163,8 @@ Web-relevant schemes registered by this plugin:
     "siteName": "example.com"
 }
 ```
+
+The search log entry (`log://turn_N/search/{slug}`) carries `{ query }` as its attributes; the body is the (URL, title, snippet) candidate listing.
 
 ## RummyWeb Registration
 
@@ -211,23 +200,26 @@ All registration is cross-scheme (`core.name` is `"web"`, but it registers on `s
 ### Handler: `search` (default priority)
 
 1. Extract query from `attrs.path` or `entry.body`.
-2. Check per-turn search cap (`RUMMY_WEB_SEARCH_MAX`). If exceeded, emit via `rummy.hooks.error.log.emit()` with status 429 and return.
-3. Query configured search backend (SearXNG or Brave).
-4. Prefetch all result pages concurrently via `fetcher.fetchAll(urls, { timeout: 5000 })`.
-5. For each successful fetch, check if the URL is already `visible` (previously promoted via `<get>`) — if so, preserve that visibility. Otherwise store at `summarized`.
-6. Store each `https://` entry with full page content and `{ query, engine, title, snippet, excerpt, byline, siteName, prefetched: true }` attributes.
-7. Failed prefetches are dropped from results.
-8. Store result listing at `entry.resultPath` with state `"resolved"`.
+2. If `rummy.noWeb`, emit a 403 via `rummy.hooks.error.log.emit()` and return.
+3. Check per-turn search cap (`RUMMY_WEB_SEARCH_MAX`). If exceeded, emit a 429 via `rummy.hooks.error.log.emit()` and return.
+4. Query configured search backend (SearXNG or Brave).
+5. Fetch every candidate URL via `fetcher.fetchAll(urls, { timeout: 5000 })` to validate reachability and measure token cost. Bodies are discarded.
+6. Drop any result whose fetch failed (network error) or whose content extraction errored (404, timeout, etc.).
+7. Build the result listing — one block per surviving result with `URL — title (N tokens)` followed by `  snippet`. Header reports `valid/total` count when any were dropped.
+8. Store the listing at `entry.resultPath` with state `"resolved"` and `{ query }` attributes.
+
+No `https://` entries are created. Pages become entries only when the model emits `<get>` on a result URL — at which point this handler fetches again (intentional: bodies were discarded after validation).
 
 ### Handler: `get` (priority 5)
 
 Priority 5 runs before the core get handler at priority 10.
 
 1. Check `attrs.path` matches `/^https?:\/\//`. If not, return (pass to next handler).
-2. If the entry has `prefetched: true` in attributes, return — let the core get handler promote it to `visible`.
-3. Otherwise, fetch the page via `WebFetcher.fetch()`.
-4. On error: log warning, return.
-5. On success: store at state `"resolved"` with markdown body and metadata attributes.
+2. If the URL is already a known entry, return — let the core get handler promote the existing entry to `visible` without a network call.
+3. If `rummy.noWeb`, emit a 403 via `rummy.hooks.error.log.emit()` and return.
+4. Fetch the page via `WebFetcher.fetch()`.
+5. On error: log warning, return.
+6. On success: store at state `"resolved"` with markdown body and metadata attributes.
 
 ### Views
 
@@ -258,11 +250,11 @@ Uses the docsMap pattern — the instructions plugin filters by active tool set 
 ## Handler Priority Chain
 
 ```
-Dispatch "get" for https://example.com (prefetched)
-  Priority 5:  RummyWeb#handleGet — prefetched=true, returns
+Dispatch "get" for https://example.com (already a known entry)
+  Priority 5:  RummyWeb#handleGet — entry exists, returns (no network)
   Priority 10: Core Get#handler — promotes entry to visible
 
-Dispatch "get" for https://example.com (not prefetched)
+Dispatch "get" for https://example.com (not yet known)
   Priority 5:  RummyWeb#handleGet — fetches page, stores entry
   Priority 10: Core Get#handler — runs on stored entry
 
@@ -278,13 +270,13 @@ Dispatch "get" for src/app.js
 ```
 Model emits <search>query</search>
   → XmlParser produces { name: "search", path: "query" }
-  → TurnExecutor records search:// entry
+  → TurnExecutor records the search entry (resultPath: log://turn_N/search/{slug})
   → hooks.tools.dispatch("search", entry, rummy)
     → RummyWeb#handleSearch fires
-    → Checks per-turn search cap
-    → Prefetches all result pages via fetchAll()
-    → Creates https:// entries at summarized visibility
-    → Stores result listing at entry.resultPath
+    → Honors noWeb (403) and per-turn search cap (429)
+    → Fetches all candidate URLs via fetchAll() to validate + measure tokens
+    → Discards bodies; drops unreachable results
+    → Stores (URL — title (N tokens) / snippet) listing at entry.resultPath
   → hooks.entry.created.emit(entry)
 ```
 
@@ -311,7 +303,7 @@ Opens a tab in the persistent context, navigates, runs Readability, converts to 
 
 ### `fetchAll(urls, opts?)`
 
-Opens concurrent tabs in the shared context. Returns `Promise.allSettled`. Each page logs fetch time and content size. Default timeout: 5s (aggressive — for prefetch where snippet fallback exists).
+Opens concurrent tabs in the shared context. Returns `Promise.allSettled`. Each page logs fetch time and content size. Default timeout: 5s (aggressive — `<search>` uses this to validate candidates and measure token cost; failures are dropped from the listing).
 
 ### `#extract(url, page, response)`
 
@@ -366,25 +358,17 @@ All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x8
 
 ## Design Decisions
 
-### Prefetch on search
+### Token-cost listing on search
 
-Search results are prefetched concurrently so the model sees real token counts at summarized visibility. Without prefetching, the model sees snippet tokens (~140) not page tokens (~20K), making context budget decisions impossible.
+Each candidate URL is fetched (concurrently, 5s timeout) so the listing can show real page token counts instead of snippet tokens (~140) vs. page tokens (~20K). Bodies are discarded after measurement — the model commits to reading by emitting `<get>`, which fetches again. This trades one extra fetch on commit for the cache benefit of never persisting unread page bodies in run state.
 
-### Summarized visibility for search results
+### `<get>` is the universal fetch verb
 
-Prefetched pages store at `summarized` visibility — the model sees paths and token counts but not the body. This prevents 12 full articles from flooding context. The model promotes individual results via `<get>` when it needs the content.
-
-### Prefetch deference on `<get>`
-
-If `<get>` targets a URL that was already prefetched (`prefetched: true` in attributes), the web handler returns immediately and lets the core get handler promote it to `visible`. No redundant fetch.
+`<search>` no longer creates `https://` entries. Pages become entries only when the model `<get>`s them — whether the URL came from a search result, page prose, or operator input. `handleGet` short-circuits if the URL is already a known entry (defers to the core handler for promotion); otherwise it fetches.
 
 ### Per-turn search cap
 
-Searches are expensive (each prefetches multiple pages). `RUMMY_WEB_SEARCH_MAX` throttles searches per turn while the overall command cap stays generous for cheap verbs. Exceeding the cap emits an error via the `hooks.error.log` hook with status 429.
-
-### Visibility preservation on re-search
-
-If a URL was already promoted to `visible` (via `<get>`), a subsequent search returning the same URL preserves the `visible` visibility instead of clobbering it back to `summarized`. Without this, the model sees a page it just promoted as unreadable and re-emits the same search.
+Each search fetches every candidate (validation + token measurement) and is therefore expensive. `RUMMY_WEB_SEARCH_MAX` throttles searches per turn while the overall command cap stays generous for cheap verbs. Exceeding the cap emits an error via the `hooks.error.log` hook with status 429.
 
 ### Web entries as `data` category
 

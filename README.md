@@ -48,7 +48,7 @@ BRAVE_API_KEY=your-api-key
 
 ### `<search>` — Web Search
 
-Queries the configured search backend and prefetches all result pages concurrently.
+Queries the configured search backend, validates each result by fetching it, and returns the surviving candidates with their token costs as a single log entry.
 
 ```xml
 <search>node.js streams backpressure</search>
@@ -56,12 +56,11 @@ Queries the configured search backend and prefetches all result pages concurrent
 ```
 
 - Results default to 12; set the `results` attribute to limit.
-- All result pages are prefetched in parallel (5s timeout per page, shared browser context).
-- Each result is stored as an `https://` entry at `summarized` visibility with the full page content — the model sees token counts but not the body until made visible.
-- Failed prefetches are dropped from results.
-- Use `<get>` on a result URL to promote it to `visible`.
+- Every candidate URL is fetched (5s timeout) — both to validate reachability and to measure the token cost the model would pay if it `<get>`s the page. Bodies are discarded; the model re-fetches via `<get>` to commit.
+- Unreachable results (404, timeout, network error) are dropped from the listing. The header reports `N of M results (M-N unreachable)` so the model knows some were filtered.
+- The search log entry's body is a list of `URL — title (N tokens)` lines, each followed by an indented snippet. Token count is the load-bearing signal for the model's "which one is worth promoting" decision.
+- No `https://` data entries are created by `<search>` itself. Pages become entries only when the model emits `<get>` on a result URL.
 - Hard-capped at `RUMMY_WEB_SEARCH_MAX` searches per turn; further searches are refused (error logged with status 429).
-- Re-searching a URL that was already promoted via `<get>` preserves its `visible` visibility.
 
 ### `<get>` — URL Fetch
 
@@ -71,10 +70,12 @@ When `<get>` targets an `http://` or `https://` URL, this plugin intercepts at p
 <get>https://en.wikipedia.org/wiki/Mitch_Hedberg</get>
 ```
 
-- If the URL was prefetched by `<search>`, the core get handler promotes it — no refetch needed.
-- Otherwise, fetches the page with headless Chromium, extracts content via Readability, converts to markdown via Turndown.
+- If the URL is already a known entry (previously fetched), this handler skips the network call and lets the core get handler promote the existing entry.
+- Otherwise, fetches the page with headless Chromium, extracts content via Readability, converts to markdown via Turndown, and stores the entry.
 - Wikipedia URLs are automatically redirected to the mobile-html API for cleaner content.
 - All fetches use mobile device emulation (Pixel 5) for lighter page responses.
+
+This makes `<get>` the universal URL-fetching verb regardless of where the URL came from — search results, page prose, or operator input.
 
 ## Programmatic Access
 

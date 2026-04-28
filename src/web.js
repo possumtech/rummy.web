@@ -1,12 +1,19 @@
 import WebFetcher from "./WebFetcher.js";
 
 const MAX_SEARCHES_PER_TURN = Number(process.env.RUMMY_WEB_SEARCH_MAX) || 1;
+const TOKEN_DIVISOR = Number(process.env.RUMMY_TOKEN_DIVISOR) || 4;
+
+function countTokens(text) {
+	if (!text) return 0;
+	return Math.ceil(text.length / TOKEN_DIVISOR);
+}
 
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web (ONE per turn)
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
-* Results are titles and snippets at "summarized" visibility.
-* Use <get path="https://example.com/page"/> on a result URL to fetch the full page (visible).
+* Results listed in the search's log entry as: \`URL — title (N tokens)\` followed by an indented snippet. Token count is the page's real cost if you <get> it; use it to pick.
+* Unreachable URLs are dropped; the header reports \`N of M results (M-N unreachable)\` when any were filtered.
+* Use <get path="https://example.com/page"/> on a result URL to fetch the full page.
 * **ONE \`<search>\` per turn.** Each call returns 5–12 candidate URLs. Additional searches the same turn are refused.`;
 
 export default class RummyWeb {
@@ -86,58 +93,42 @@ export default class RummyWeb {
 		const limit = attrs.results || 12;
 		const results = await this.#getFetcher().search(query, { limit });
 
-		// Prefetch all pages in a shared browser context so the model
-		// sees real token counts at summarized visibility. Shared context =
-		// shared DNS/cache/connections; 5s timeout per page, snippet fallback.
-		const fetcher = this.#getFetcher();
+		// Fetch each candidate to validate + measure token cost. Bodies
+		// are discarded; the model re-fetches via <get> when it commits to
+		// reading. The token total guides the model's "which is worth
+		// promoting" choice in the search log entry's listing.
 		const urls = results.map((r) => WebFetcher.cleanUrl(r.url));
-		const fetchStart = Date.now();
-		const pages = await fetcher.fetchAll(urls, { timeout: 5000 });
-		console.log(
-			`[RUMMY] Prefetched ${urls.length} pages in ${((Date.now() - fetchStart) / 1000).toFixed(1)}s`,
-		);
+		const pages = await this.#getFetcher().fetchAll(urls, { timeout: 5000 });
 
-		const successUrls = [];
+		const valid = [];
 		for (let i = 0; i < results.length; i++) {
 			const r = results[i];
-			const url = urls[i];
 			const page = pages[i];
 			const fetched = page.status === "fulfilled" ? page.value : null;
-			const fetchOk = fetched && !fetched.error;
-
-			if (!fetchOk) continue;
-
-			successUrls.push(url);
-			const header = fetched.title ? `# ${fetched.title}\n\n` : "";
-			// Preserve existing visibility: if an earlier <get> already
-			// promoted this URL, a later search returning the same URL
-			// would otherwise clobber it back to "summarized" — the model
-			// then sees the page it just promoted as unreadable and
-			// re-emits the same search looking for something it can read.
-			const existing = await rummy.getEntries(url, null);
-			const keepVisible = existing[0]?.visibility === "visible";
-			await rummy.set({
-				path: url,
-				body: header + (fetched.content || ""),
-				state: "resolved",
-				visibility: keepVisible ? "visible" : "summarized",
-				attributes: {
-					query,
-					engine: r.engine,
-					title: fetched.title || r.title,
-					snippet: r.snippet,
-					excerpt: fetched.excerpt,
-					byline: fetched.byline,
-					siteName: fetched.siteName,
-					prefetched: true,
-				},
+			if (!fetched || fetched.error) continue;
+			valid.push({
+				url: urls[i],
+				title: fetched.title || r.title,
+				snippet: r.snippet,
+				tokens: countTokens(fetched.content),
 			});
 		}
 
-		const listing = successUrls.join("\n");
+		const header =
+			valid.length === results.length
+				? `${results.length} results for "${query}"`
+				: `${valid.length} of ${results.length} results for "${query}" (${results.length - valid.length} unreachable)`;
+		const lines = [header, ""];
+		for (const r of valid) {
+			const head = r.title ? `${r.url} — ${r.title}` : r.url;
+			lines.push(`${head} (${r.tokens} tokens)`);
+			if (r.snippet) lines.push(`  ${r.snippet}`);
+			lines.push("");
+		}
+
 		await rummy.set({
 			path: entry.resultPath,
-			body: `${successUrls.length} results for "${query}"\n${listing}`,
+			body: lines.join("\n").trimEnd(),
 			state: "resolved",
 			attributes: { query },
 		});
@@ -150,14 +141,12 @@ export default class RummyWeb {
 
 		const clean = WebFetcher.cleanUrl(target);
 
-		// If search already prefetched this page, the content is already
-		// in the entry — just let the core get handler promote it.
-		const existing = await rummy.getAttributes(clean);
-		if (existing?.prefetched) return;
+		// Already-fetched URLs become entries on first <get>; subsequent
+		// <get>s on the same URL just promote the existing entry via the
+		// core get handler.
+		const existing = await rummy.getEntries(clean, null);
+		if (existing.length > 0) return;
 
-		// Honor noWeb on direct URL fetches too. Without this, a run with
-		// noWeb=true would still fetch the moment the model <get>s a URL
-		// it found in a session text or prior context.
 		if (rummy.noWeb) {
 			await rummy.hooks.error.log.emit({
 				store: rummy.entries,
@@ -170,7 +159,6 @@ export default class RummyWeb {
 			return;
 		}
 
-		// Not prefetched (direct <get> on a URL) — fetch now.
 		let fetched;
 		try {
 			fetched = await this.#getFetcher().fetch(clean);

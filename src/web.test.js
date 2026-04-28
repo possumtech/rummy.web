@@ -105,17 +105,9 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 		);
 	});
 
-	// Materialization regression: an earlier <get> that promoted a URL
-	// was silently demoted by any later search that happened to return
-	// the same URL. Model then saw the page it had just promoted as
-	// unreadable and re-emitted the same search — the exact failure
-	// mode diagnosed in rummy_dev.db::test:demo (T3 promoted wateratlas
-	// → T4 search re-demoted it → T6 model "doesn't see the content").
-	describe("result writes preserve existing visibility (@fidelity_semantics)", () => {
-		it("URL already at visible stays visible after re-appearing in search results", async () => {
+	describe("search returns candidates as a single log entry (@plugins_handler_outcomes)", () => {
+		it("emits one log entry with (URL, title, snippet, tokens) listing; creates no <https> entries", async () => {
 			const handler = captureHandler();
-			const alreadyPromoted = "https://example.com/page";
-			const getEntriesCalls = [];
 			const setCalls = [];
 			const rummy = {
 				runId: 1,
@@ -123,42 +115,48 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 				sequence: 5,
 				entries: { set: async () => {} },
 				getEntries: async (pattern) => {
-					getEntriesCalls.push(pattern);
-					if (pattern.startsWith("log://")) return []; // no prior search
-					if (pattern === alreadyPromoted) {
-						return [{ path: alreadyPromoted, visibility: "visible" }];
-					}
+					if (pattern.startsWith("log://")) return [];
 					return [];
 				},
 				set: async (payload) => setCalls.push(payload),
 				getAttributes: async () => null,
 				hooks: { error: { log: { emit: async () => {} } } },
 			};
-			// Stub WebFetcher so we don't hit network. Monkey-patch the
-			// plugin's private fetcher by triggering the lazy init then
-			// replacing its methods. Simpler: mock via the module boundary.
-			const web = await import("./web.js");
-			const _originalFetch = web.default.prototype;
-			// Replace WebFetcher via the plugin instance captured above.
-			// captureHandler returned the bound handler; we need to reach
-			// the plugin. Easier: test the branch directly by feeding an
-			// existing-visible URL through and asserting setCalls captures
-			// visibility="visible".
 
-			// Drive the handler with a mock fetcher patch.
 			const WebFetcher = (await import("./WebFetcher.js")).default;
 			const origSearch = WebFetcher.prototype.search;
 			const origFetchAll = WebFetcher.prototype.fetchAll;
 			WebFetcher.prototype.search = async () => [
-				{ url: alreadyPromoted, engine: "brave", title: "T", snippet: "S" },
+				{
+					url: "https://a.example/page",
+					engine: "brave",
+					title: "Page A",
+					snippet: "snippet A",
+				},
+				{
+					url: "https://b.example/page",
+					engine: "brave",
+					title: "Page B",
+					snippet: "snippet B",
+				},
 			];
 			WebFetcher.prototype.fetchAll = async () => [
 				{
 					status: "fulfilled",
 					value: {
-						title: "Title",
-						content: "fresh body",
-						excerpt: "E",
+						title: "Page A",
+						content: "x".repeat(400),
+						excerpt: null,
+						byline: null,
+						siteName: null,
+					},
+				},
+				{
+					status: "fulfilled",
+					value: {
+						title: "Page B",
+						content: "y".repeat(800),
+						excerpt: null,
 						byline: null,
 						siteName: null,
 					},
@@ -168,7 +166,7 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			try {
 				await handler(
 					{
-						attributes: { path: "q" },
+						attributes: { path: "the query" },
 						resultPath: "log://turn_5/search/q",
 					},
 					rummy,
@@ -178,28 +176,44 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 				WebFetcher.prototype.fetchAll = origFetchAll;
 			}
 
-			const pageSet = setCalls.find((c) => c.path === alreadyPromoted);
-			assert.ok(pageSet, "search re-set the result URL");
+			const pageWrites = setCalls.filter((c) => c.path?.startsWith("https://"));
 			assert.strictEqual(
-				pageSet.visibility,
-				"visible",
-				"already-visible URL must not be demoted by a subsequent search",
+				pageWrites.length,
+				0,
+				"search creates no <https> data entries — fetching is <get>'s job",
+			);
+
+			const logWrite = setCalls.find((c) => c.path === "log://turn_5/search/q");
+			assert.ok(logWrite, "search wrote its log entry");
+			assert.ok(
+				logWrite.body.includes("https://a.example/page"),
+				"first URL listed",
+			);
+			assert.ok(logWrite.body.includes("Page A"), "title listed");
+			assert.ok(logWrite.body.includes("snippet A"), "snippet listed");
+			assert.ok(
+				logWrite.body.includes("https://b.example/page"),
+				"second URL listed",
+			);
+			assert.ok(
+				/\(\d+ tokens\)/.test(logWrite.body),
+				"each result lists its token count",
+			);
+			assert.ok(
+				logWrite.body.includes('2 results for "the query"'),
+				"header names result count and query",
 			);
 		});
 
-		it("URL NOT previously present gets the default summarized visibility", async () => {
+		it("drops unreachable results from the listing and reports the count", async () => {
 			const handler = captureHandler();
-			const newUrl = "https://example.com/newpage";
 			const setCalls = [];
 			const rummy = {
 				runId: 1,
 				loopId: 1,
 				sequence: 5,
 				entries: { set: async () => {} },
-				getEntries: async (pattern) => {
-					if (pattern.startsWith("log://")) return [];
-					return []; // URL not previously in DB
-				},
+				getEntries: async () => [],
 				set: async (payload) => setCalls.push(payload),
 				getAttributes: async () => null,
 				hooks: { error: { log: { emit: async () => {} } } },
@@ -209,18 +223,26 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			const origSearch = WebFetcher.prototype.search;
 			const origFetchAll = WebFetcher.prototype.fetchAll;
 			WebFetcher.prototype.search = async () => [
-				{ url: newUrl, engine: "brave", title: "T", snippet: "S" },
+				{ url: "https://ok.example/page", title: "OK", snippet: "" },
+				{ url: "https://gone.example/404", title: "Gone", snippet: "" },
+				{ url: "https://timeout.example/page", title: "Slow", snippet: "" },
 			];
 			WebFetcher.prototype.fetchAll = async () => [
 				{
 					status: "fulfilled",
+					value: { title: "OK", content: "alive", excerpt: null },
+				},
+				{
+					status: "fulfilled",
 					value: {
-						title: "Title",
-						content: "new body",
-						excerpt: "E",
-						byline: null,
-						siteName: null,
+						title: null,
+						content: null,
+						error: "HTTP 404",
 					},
+				},
+				{
+					status: "rejected",
+					reason: new Error("timeout"),
 				},
 			];
 
@@ -234,9 +256,17 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 				WebFetcher.prototype.fetchAll = origFetchAll;
 			}
 
-			const pageSet = setCalls.find((c) => c.path === newUrl);
-			assert.ok(pageSet);
-			assert.strictEqual(pageSet.visibility, "summarized");
+			const logWrite = setCalls.find((c) => c.path === "log://turn_5/search/q");
+			assert.ok(logWrite);
+			assert.ok(
+				logWrite.body.includes(
+					'1 of 3 results for "q" (2 unreachable)',
+				),
+				"header reports valid/total count and unreachable count",
+			);
+			assert.ok(logWrite.body.includes("https://ok.example/page"));
+			assert.ok(!logWrite.body.includes("https://gone.example/404"));
+			assert.ok(!logWrite.body.includes("https://timeout.example/page"));
 		});
 	});
 
