@@ -56,7 +56,7 @@ Queries the configured search backend, fetches each result in parallel, archives
 ```
 
 - Results default to 12; set the `results` attribute to limit.
-- Every candidate URL is fetched in parallel (10s timeout) — to validate reachability, measure token cost, and archive the body for a zero-network `<get>`.
+- Every candidate URL is fetched in parallel (10s timeout) — to validate reachability, measure token cost, and archive the body for a zero-network `<get>`. Candidates already archived within the last 10 minutes are served from the existing entry; only stale or new URLs hit the network.
 - Unreachable results (404, timeout, network error) are dropped from the listing. The header reports `N of M results (M-N unreachable)` so the model knows some were filtered.
 - The search log entry's body is a markdown bullet list — `* URL — title (N tokens)` per candidate, with an indented snippet line beneath. The leading `*` is load-bearing: it marks the body as rendered output the model has no training prior for emitting as a tool. Token count is the signal for the model's "which one is worth promoting" decision.
 - Each successfully-fetched URL lands as an archived `<https>` entry (`state: "resolved"`, `visibility: "archived"`) with the body and `{title, excerpt, byline, siteName}` attributes. `<get>` on a listed URL becomes a pure visibility flip; no re-fetch.
@@ -70,7 +70,7 @@ When `<get>` targets an `http://` or `https://` URL, this plugin intercepts at p
 <get>https://en.wikipedia.org/wiki/Mitch_Hedberg</get>
 ```
 
-- If the URL is already a known entry (previously fetched), this handler skips the network call and lets the core get handler promote the existing entry.
+- If the URL is already a known entry **and was fetched within the last 10 minutes**, this handler skips the network call and lets the core get handler promote the existing entry. Stale entries (older than 10 min) fall through to a fresh fetch and overwrite the archive.
 - Otherwise, fetches the page with headless Chromium, extracts content via Readability, converts to markdown via Turndown, and stores the entry.
 - Wikipedia URLs are automatically redirected to the mobile-html API for cleaner content.
 - All fetches use mobile device emulation (Pixel 5) for lighter page responses.

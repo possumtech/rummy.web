@@ -5,14 +5,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import RummyWeb from "./web.js";
 
-function captureHandler() {
-	let searchHandler = null;
+function captureHandlers() {
+	const handlers = {};
 	const core = {
 		hooks: {
 			tools: {
 				ensureTool: () => {},
 				onHandle: (scheme, fn) => {
-					if (scheme === "search") searchHandler = fn;
+					handlers[scheme] = fn;
 				},
 				onView: () => {},
 			},
@@ -22,8 +22,13 @@ function captureHandler() {
 		filter: () => {},
 	};
 	new RummyWeb(core);
-	if (!searchHandler) throw new Error("search handler not registered");
-	return searchHandler;
+	return handlers;
+}
+
+function captureHandler() {
+	const h = captureHandlers().search;
+	if (!h) throw new Error("search handler not registered");
+	return h;
 }
 
 function makeRummy({ priorSearches = [] } = {}) {
@@ -304,6 +309,270 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			rummy._emitted.length,
 			0,
 			"no error emitted when no prior searches this turn",
+		);
+	});
+});
+
+// Per-URL cache: an http/https entry younger than CACHE_TTL_MS is served
+// from its existing archived body — same rule for both <get> and search.
+describe("RummyWeb — http/https cache (10 min TTL)", () => {
+	function archivedEntry(url, body, attrs = {}) {
+		return {
+			path: url,
+			body,
+			attributes: { title: "cached title", ...attrs },
+			tokens: Math.ceil(body.length / 4),
+		};
+	}
+
+	it("search: fresh URL is served from existing entry (no refetch)", async () => {
+		const handler = captureHandler();
+		const setCalls = [];
+		const fresh = archivedEntry("https://a.example/page", "cached body A", {
+			fetched_at: Date.now() - 60_000, // 1 min ago — fresh
+		});
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			entries: { set: async () => {} },
+			getEntries: async (path) => {
+				if (path === "https://a.example/page") return [fresh];
+				if (path.startsWith("log://")) return [];
+				return [];
+			},
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origSearch = WebFetcher.prototype.search;
+		const origFetchAll = WebFetcher.prototype.fetchAll;
+		const fetchAllCalls = [];
+		WebFetcher.prototype.search = async () => [
+			{ url: "https://a.example/page", title: "A", snippet: "" },
+			{ url: "https://b.example/page", title: "B", snippet: "" },
+		];
+		WebFetcher.prototype.fetchAll = async (urls) => {
+			fetchAllCalls.push(urls);
+			return [
+				{
+					status: "fulfilled",
+					value: { title: "B", content: "fresh body B", excerpt: null },
+				},
+			];
+		};
+
+		try {
+			await handler(
+				{ attributes: { path: "q" }, resultPath: "log://turn_5/search/q" },
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.search = origSearch;
+			WebFetcher.prototype.fetchAll = origFetchAll;
+		}
+
+		// fetchAll should be called only with stale/missing URL (b), not a
+		assert.deepEqual(
+			fetchAllCalls,
+			[["https://b.example/page"]],
+			"cached URL is omitted from the network round-trip",
+		);
+		// The cached URL doesn't trigger a rummy.set (already exists)
+		const aWrites = setCalls.filter((c) => c.path === "https://a.example/page");
+		assert.equal(aWrites.length, 0, "cached entry isn't rewritten");
+		// b WAS fetched and lands fresh
+		const bWrites = setCalls.filter((c) => c.path === "https://b.example/page");
+		assert.equal(bWrites.length, 1);
+		assert.ok(bWrites[0].attributes.fetched_at, "new fetch stamps fetched_at");
+		// Both URLs appear in the listing
+		const log = setCalls.find((c) => c.path === "log://turn_5/search/q");
+		assert.ok(log.body.includes("https://a.example/page"));
+		assert.ok(log.body.includes("https://b.example/page"));
+	});
+
+	it("search: stale URL is refetched and upserted", async () => {
+		const handler = captureHandler();
+		const setCalls = [];
+		const stale = archivedEntry("https://a.example/page", "old cached", {
+			fetched_at: Date.now() - 11 * 60_000, // 11 min ago — stale
+		});
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			entries: { set: async () => {} },
+			getEntries: async (path) => {
+				if (path === "https://a.example/page") return [stale];
+				if (path.startsWith("log://")) return [];
+				return [];
+			},
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origSearch = WebFetcher.prototype.search;
+		const origFetchAll = WebFetcher.prototype.fetchAll;
+		const fetchAllCalls = [];
+		WebFetcher.prototype.search = async () => [
+			{ url: "https://a.example/page", title: "A", snippet: "" },
+		];
+		WebFetcher.prototype.fetchAll = async (urls) => {
+			fetchAllCalls.push(urls);
+			return [
+				{
+					status: "fulfilled",
+					value: { title: "A", content: "fresh body A", excerpt: null },
+				},
+			];
+		};
+
+		try {
+			await handler(
+				{ attributes: { path: "q" }, resultPath: "log://turn_5/search/q" },
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.search = origSearch;
+			WebFetcher.prototype.fetchAll = origFetchAll;
+		}
+
+		assert.deepEqual(
+			fetchAllCalls,
+			[["https://a.example/page"]],
+			"stale URL IS refetched",
+		);
+		const aWrites = setCalls.filter((c) => c.path === "https://a.example/page");
+		assert.equal(aWrites.length, 1);
+		assert.ok(aWrites[0].body.includes("fresh body A"));
+		assert.ok(
+			aWrites[0].attributes.fetched_at,
+			"refetch stamps a new fetched_at",
+		);
+	});
+
+	it("<get>: fresh URL → no refetch (core get plugin handles promote)", async () => {
+		const handlers = captureHandlers();
+		const handleGet = handlers.get;
+		const setCalls = [];
+		const fetchCalls = [];
+		const fresh = archivedEntry("https://a.example/page", "cached body", {
+			fetched_at: Date.now() - 30_000,
+		});
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			entries: { set: async () => {} },
+			getEntries: async (path) => {
+				if (path === "https://a.example/page") return [fresh];
+				return [];
+			},
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origFetch = WebFetcher.prototype.fetch;
+		WebFetcher.prototype.fetch = async (url) => {
+			fetchCalls.push(url);
+			return { url, title: "A", content: "shouldn't see this" };
+		};
+
+		try {
+			await handleGet(
+				{ attributes: { path: "https://a.example/page" } },
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.fetch = origFetch;
+		}
+		assert.deepEqual(fetchCalls, [], "fresh entry skips network");
+		assert.equal(setCalls.length, 0, "fresh entry isn't rewritten");
+	});
+
+	it("<get>: stale URL → refetches and upserts with new fetched_at", async () => {
+		const handlers = captureHandlers();
+		const handleGet = handlers.get;
+		const setCalls = [];
+		const fetchCalls = [];
+		const stale = archivedEntry("https://a.example/page", "old", {
+			fetched_at: Date.now() - 11 * 60_000,
+		});
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			entries: { set: async () => {} },
+			getEntries: async (path) => {
+				if (path === "https://a.example/page") return [stale];
+				return [];
+			},
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origFetch = WebFetcher.prototype.fetch;
+		WebFetcher.prototype.fetch = async (url) => {
+			fetchCalls.push(url);
+			return { url, title: "A", content: "fresh body" };
+		};
+
+		try {
+			await handleGet(
+				{ attributes: { path: "https://a.example/page" } },
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.fetch = origFetch;
+		}
+		assert.deepEqual(
+			fetchCalls,
+			["https://a.example/page"],
+			"stale entry IS refetched",
+		);
+		assert.equal(setCalls.length, 1);
+		assert.ok(setCalls[0].body.includes("fresh body"));
+		assert.ok(setCalls[0].attributes.fetched_at);
+	});
+
+	it("<get>: missing entry → fetches as before, stamps fetched_at", async () => {
+		const handlers = captureHandlers();
+		const handleGet = handlers.get;
+		const setCalls = [];
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			entries: { set: async () => {} },
+			getEntries: async () => [],
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origFetch = WebFetcher.prototype.fetch;
+		WebFetcher.prototype.fetch = async (url) => ({
+			url,
+			title: "X",
+			content: "first time",
+		});
+		try {
+			await handleGet({ attributes: { path: "https://x.example/p" } }, rummy);
+		} finally {
+			WebFetcher.prototype.fetch = origFetch;
+		}
+		assert.equal(setCalls.length, 1);
+		assert.ok(
+			typeof setCalls[0].attributes.fetched_at === "number",
+			"first fetch stamps fetched_at as a number",
 		);
 	});
 });

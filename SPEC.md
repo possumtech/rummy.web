@@ -160,9 +160,12 @@ Web-relevant schemes registered by this plugin:
     "title": "Page Title",
     "excerpt": "Short description",
     "byline": "Author Name",
-    "siteName": "example.com"
+    "siteName": "example.com",
+    "fetched_at": 1735689600000
 }
 ```
+
+`fetched_at` is `Date.now()` at write time. It's the freshness signal for the 10-minute cache check applied by both `<search>` (skip refetch of fresh candidates) and `<get>` (skip refetch of fresh existing entries).
 
 The search log entry (`log://turn_N/search/{slug}`) carries `{ query }` as its attributes; the body is the (URL, title, snippet) candidate listing.
 
@@ -203,11 +206,12 @@ All registration is cross-scheme (`core.name` is `"web"`, but it registers on `s
 2. If `rummy.noWeb`, emit a 403 via `rummy.hooks.error.log.emit()` and return.
 3. Check per-turn search cap (`RUMMY_WEB_SEARCH_MAX`). If exceeded, emit a 429 via `rummy.hooks.error.log.emit()` and return.
 4. Query configured search backend (SearXNG or Brave).
-5. Fetch every candidate URL in parallel via `fetcher.fetchAll(urls, { timeout: 10000 })` to validate reachability, measure token cost, and capture the body.
-6. Drop any result whose fetch failed (network error) or whose content extraction errored (404, timeout, etc.).
-7. For each survivor, archive the body as an `<https>` entry: `path: cleanUrl`, `state: "resolved"`, `visibility: "archived"`, body `# {title}\n\n{content}`, attributes `{title, excerpt, byline, siteName}`.
-8. Build the result listing as a markdown bullet list — `* URL — title (N tokens)` per survivor with an indented snippet line. Header reports `valid/total` count when any were dropped. The `*` prefix is load-bearing — it makes the body unambiguously rendered output, not something the model would emit as a tool.
-9. Store the listing at `entry.resultPath` with state `"resolved"` and `{ query }` attributes.
+5. Partition candidates against the cache: for each cleaned URL, look up an existing entry. If one exists and `attributes.fetched_at` is younger than `CACHE_TTL_MS` (10 min), reuse it; otherwise queue for fetch.
+6. Fetch the queued (stale or new) URLs in parallel via `fetcher.fetchAll(urls, { timeout: 10000 })` to validate reachability, measure token cost, and capture the body. If everything was cached, the network call is skipped entirely.
+7. Drop any freshly-fetched result whose fetch failed (network error) or whose content extraction errored (404, timeout, etc.).
+8. For each fresh survivor, archive the body as an `<https>` entry: `path: cleanUrl`, `state: "resolved"`, `visibility: "archived"`, body `# {title}\n\n{content}`, attributes `{title, excerpt, byline, siteName, fetched_at}`. Cached survivors are reused as-is — no rewrite.
+9. Build the result listing as a markdown bullet list — `* URL — title (N tokens)` per survivor with an indented snippet line. Header reports `valid/total` count when any were dropped. The `*` prefix is load-bearing — it makes the body unambiguously rendered output, not something the model would emit as a tool.
+10. Store the listing at `entry.resultPath` with state `"resolved"` and `{ query }` attributes.
 
 A subsequent `<get>` on any listed URL hits the existing-entry short-circuit in the get handler and is promoted to `visible` without a second round trip.
 
@@ -216,11 +220,11 @@ A subsequent `<get>` on any listed URL hits the existing-entry short-circuit in 
 Priority 5 runs before the core get handler at priority 10.
 
 1. Check `attrs.path` matches `/^https?:\/\//`. If not, return (pass to next handler).
-2. If the URL is already a known entry, return — let the core get handler promote the existing entry to `visible` without a network call.
+2. If the URL is already a known entry **and `attributes.fetched_at` is younger than `CACHE_TTL_MS`**, return — let the core get handler promote the existing entry to `visible` without a network call. Stale entries fall through to step 4.
 3. If `rummy.noWeb`, emit a 403 via `rummy.hooks.error.log.emit()` and return.
 4. Fetch the page via `WebFetcher.fetch()`.
 5. On error: log warning, return.
-6. On success: store at state `"resolved"` with markdown body and metadata attributes.
+6. On success: store at state `"resolved"` with markdown body and metadata attributes (including `fetched_at: Date.now()`). Overwrites any prior stale archive at the same path.
 
 ### Views
 
@@ -251,9 +255,13 @@ Uses the docsMap pattern — the instructions plugin filters by active tool set 
 ## Handler Priority Chain
 
 ```
-Dispatch "get" for https://example.com (already a known entry)
-  Priority 5:  RummyWeb#handleGet — entry exists, returns (no network)
+Dispatch "get" for https://example.com (known entry, fresh)
+  Priority 5:  RummyWeb#handleGet — fresh archive, returns (no network)
   Priority 10: Core Get#handler — promotes entry to visible
+
+Dispatch "get" for https://example.com (known entry, stale > 10 min)
+  Priority 5:  RummyWeb#handleGet — refetches, overwrites archive
+  Priority 10: Core Get#handler — runs on refreshed entry
 
 Dispatch "get" for https://example.com (not yet known)
   Priority 5:  RummyWeb#handleGet — fetches page, stores entry
@@ -275,8 +283,9 @@ Model emits <search>query</search>
   → hooks.tools.dispatch("search", entry, rummy)
     → RummyWeb#handleSearch fires
     → Honors noWeb (403) and per-turn search cap (429)
-    → Fetches all candidate URLs in parallel via fetchAll() to validate + measure tokens
-    → Archives each survivor as an <https> entry (visibility: "archived"); drops unreachable results
+    → Partitions candidates: fresh archives (fetched_at < 10 min) reused as-is; stale/new go to fetchAll()
+    → Fetches the stale/new subset in parallel to validate + measure tokens
+    → Archives each fresh survivor as an <https> entry (visibility: "archived", fetched_at stamped); drops unreachable
     → Stores (* URL — title (N tokens) / snippet) bullet listing at entry.resultPath
   → hooks.entry.created.emit(entry)
 ```
@@ -365,11 +374,15 @@ Each candidate URL is fetched concurrently (10s timeout) so the listing can show
 
 ### `<get>` is the universal fetch verb
 
-Pages become run entries through two paths: archived during `<search>` prefetch, or fetched on demand by `<get>` when the URL came from page prose or operator input. `handleGet` short-circuits if the URL is already a known entry (defers to the core handler for promotion); otherwise it fetches. After search has run, the short-circuit is the common case.
+Pages become run entries through two paths: archived during `<search>` prefetch, or fetched on demand by `<get>` when the URL came from page prose or operator input. `handleGet` short-circuits if the URL is already a known entry **and the archive is fresh** (`fetched_at` within `CACHE_TTL_MS`), deferring to the core handler for promotion; stale or missing entries fall through to a fetch. After search has run, the fresh short-circuit is the common case.
+
+### Per-URL freshness cache (10 min TTL)
+
+A single `CACHE_TTL_MS = 10 * 60 * 1000` constant gates both `<search>` and `<get>`. Every successful fetch (from either path) stamps `attributes.fetched_at = Date.now()` on the archived `<https>` entry. On the next visit, an entry younger than the TTL is reused as-is; older entries are refetched and overwritten. One TTL, one stamp, one predicate (`isFresh`) — applied identically at both entry points so the model never has to reason about cache semantics differing between verbs. Trade-off: a stale page can be served for up to 10 minutes after its first archive; refresh latency is bounded by the TTL, not by anything the model can control.
 
 ### Per-turn search cap
 
-Each search fetches and archives every candidate and is therefore expensive — both in network time and in run-state size. `RUMMY_WEB_SEARCH_MAX` throttles searches per turn while the overall command cap stays generous for cheap verbs. Exceeding the cap emits an error via the `hooks.error.log` hook with status 429.
+Each search fetches and archives every cache-miss candidate and is therefore expensive — both in network time and in run-state size. `RUMMY_WEB_SEARCH_MAX` throttles searches per turn while the overall command cap stays generous for cheap verbs. Exceeding the cap emits an error via the `hooks.error.log` hook with status 429.
 
 ### Web entries as `data` category
 

@@ -2,10 +2,23 @@ import WebFetcher from "./WebFetcher.js";
 
 const MAX_SEARCHES_PER_TURN = Number(process.env.RUMMY_WEB_SEARCH_MAX) || 1;
 const TOKEN_DIVISOR = Number(process.env.RUMMY_TOKEN_DIVISOR) || 4;
+// Per-URL cache TTL. An http/https entry whose attributes.fetched_at is
+// younger than this is served from the existing archived body — same
+// rule for both <get> and search-result paths.
+const CACHE_TTL_MS = 10 * 60 * 1000;
 
 function countTokens(text) {
 	if (!text) return 0;
 	return Math.ceil(text.length / TOKEN_DIVISOR);
+}
+
+function isFresh(entry, now = Date.now()) {
+	const attrs =
+		typeof entry.attributes === "string"
+			? JSON.parse(entry.attributes)
+			: entry.attributes || {};
+	if (!attrs.fetched_at) return false;
+	return now - attrs.fetched_at < CACHE_TTL_MS;
 }
 
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web (ONE per turn)
@@ -101,16 +114,53 @@ export default class RummyWeb {
 		// load within the deadline are dropped from the listing; the
 		// header reports the count. The token total guides the model's
 		// "which is worth promoting" choice.
+		//
+		// Cache: any URL already in the run as an archived entry whose
+		// attributes.fetched_at is younger than CACHE_TTL_MS is served
+		// from the cached body. We skip the network round-trip and reuse
+		// the entry verbatim. Stale entries fall through to refetch.
 		const urls = results.map((r) => WebFetcher.cleanUrl(r.url));
-		const pages = await this.#getFetcher().fetchAll(urls, { timeout: 10000 });
+		const now = Date.now();
+		const cached = new Map();
+		const toFetch = [];
+		for (const url of urls) {
+			const existing = await rummy.getEntries(url, null);
+			if (existing.length > 0 && isFresh(existing[0], now)) {
+				cached.set(url, existing[0]);
+			} else {
+				toFetch.push(url);
+			}
+		}
+		const fetchedPages =
+			toFetch.length > 0
+				? await this.#getFetcher().fetchAll(toFetch, { timeout: 10000 })
+				: [];
+		const fetchedByUrl = new Map();
+		for (let i = 0; i < toFetch.length; i++) {
+			fetchedByUrl.set(toFetch[i], fetchedPages[i]);
+		}
 
 		const valid = [];
 		for (let i = 0; i < results.length; i++) {
 			const r = results[i];
-			const page = pages[i];
-			const fetched = page.status === "fulfilled" ? page.value : null;
-			if (!fetched || fetched.error) continue;
 			const url = urls[i];
+			if (cached.has(url)) {
+				const e = cached.get(url);
+				const eAttrs =
+					typeof e.attributes === "string"
+						? JSON.parse(e.attributes)
+						: e.attributes || {};
+				valid.push({
+					url,
+					title: eAttrs.title || r.title,
+					snippet: r.snippet,
+					tokens: e.tokens ?? countTokens(e.body),
+				});
+				continue;
+			}
+			const page = fetchedByUrl.get(url);
+			const fetched = page?.status === "fulfilled" ? page.value : null;
+			if (!fetched || fetched.error) continue;
 			const titleHeader = fetched.title ? `# ${fetched.title}\n\n` : "";
 			await rummy.set({
 				path: url,
@@ -122,6 +172,7 @@ export default class RummyWeb {
 					excerpt: fetched.excerpt,
 					byline: fetched.byline,
 					siteName: fetched.siteName,
+					fetched_at: now,
 				},
 			});
 			valid.push({
@@ -163,11 +214,12 @@ export default class RummyWeb {
 
 		const clean = WebFetcher.cleanUrl(target);
 
-		// Already-fetched URLs become entries on first <get>; subsequent
-		// <get>s on the same URL just promote the existing entry via the
-		// core get handler.
+		// Cache: an existing archived entry whose attributes.fetched_at
+		// is younger than CACHE_TTL_MS is served as-is — the core get
+		// handler does the visibility flip; we don't refetch. Stale or
+		// missing entries fall through to a fresh fetch.
 		const existing = await rummy.getEntries(clean, null);
-		if (existing.length > 0) return;
+		if (existing.length > 0 && isFresh(existing[0])) return;
 
 		if (rummy.noWeb) {
 			await rummy.hooks.error.log.emit({
@@ -203,6 +255,7 @@ export default class RummyWeb {
 				excerpt: fetched.excerpt,
 				byline: fetched.byline,
 				siteName: fetched.siteName,
+				fetched_at: Date.now(),
 			},
 		});
 	}
