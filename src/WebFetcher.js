@@ -142,7 +142,7 @@ export default class WebFetcher {
 	 * Fetch multiple URLs as concurrent tabs in the persistent context.
 	 * Shared DNS, cache, and connections across all pages.
 	 */
-	async fetchAll(urls, { timeout = 5000 } = {}) {
+	async fetchAll(urls, { timeout = 10000 } = {}) {
 		const context = await this.#getContext();
 		return Promise.allSettled(
 			urls.map(async (rawUrl) => {

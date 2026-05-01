@@ -48,7 +48,7 @@ BRAVE_API_KEY=your-api-key
 
 ### `<search>` — Web Search
 
-Queries the configured search backend, validates each result by fetching it, and returns the surviving candidates with their token costs as a single log entry.
+Queries the configured search backend, fetches each result in parallel, archives the bodies as `<https>` run entries (`visibility: "archived"`), and returns the surviving candidates with their token costs as a single log entry. A subsequent `<get>` on any listed URL is a pure visibility flip — no second round trip.
 
 ```xml
 <search>node.js streams backpressure</search>
@@ -56,10 +56,10 @@ Queries the configured search backend, validates each result by fetching it, and
 ```
 
 - Results default to 12; set the `results` attribute to limit.
-- Every candidate URL is fetched (5s timeout) — both to validate reachability and to measure the token cost the model would pay if it `<get>`s the page. Bodies are discarded; the model re-fetches via `<get>` to commit.
+- Every candidate URL is fetched in parallel (10s timeout) — to validate reachability, measure token cost, and archive the body for a zero-network `<get>`.
 - Unreachable results (404, timeout, network error) are dropped from the listing. The header reports `N of M results (M-N unreachable)` so the model knows some were filtered.
-- The search log entry's body is a list of `URL — title (N tokens)` lines, each followed by an indented snippet. Token count is the load-bearing signal for the model's "which one is worth promoting" decision.
-- No `https://` data entries are created by `<search>` itself. Pages become entries only when the model emits `<get>` on a result URL.
+- The search log entry's body is a markdown bullet list — `* URL — title (N tokens)` per candidate, with an indented snippet line beneath. The leading `*` is load-bearing: it marks the body as rendered output the model has no training prior for emitting as a tool. Token count is the signal for the model's "which one is worth promoting" decision.
+- Each successfully-fetched URL lands as an archived `<https>` entry (`state: "resolved"`, `visibility: "archived"`) with the body and `{title, excerpt, byline, siteName}` attributes. `<get>` on a listed URL becomes a pure visibility flip; no re-fetch.
 - Hard-capped at `RUMMY_WEB_SEARCH_MAX` searches per turn; further searches are refused (error logged with status 429).
 
 ### `<get>` — URL Fetch

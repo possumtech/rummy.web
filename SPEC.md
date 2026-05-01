@@ -153,7 +153,7 @@ Web-relevant schemes registered by this plugin:
 
 ### Entry Attributes
 
-`https://` entries are created only by `<get>` (search no longer prefetches). The attribute set is:
+`https://` entries are created by both `<search>` (archived per candidate) and `<get>` (visible on demand). The attribute set is:
 
 ```json
 {
@@ -203,12 +203,13 @@ All registration is cross-scheme (`core.name` is `"web"`, but it registers on `s
 2. If `rummy.noWeb`, emit a 403 via `rummy.hooks.error.log.emit()` and return.
 3. Check per-turn search cap (`RUMMY_WEB_SEARCH_MAX`). If exceeded, emit a 429 via `rummy.hooks.error.log.emit()` and return.
 4. Query configured search backend (SearXNG or Brave).
-5. Fetch every candidate URL via `fetcher.fetchAll(urls, { timeout: 5000 })` to validate reachability and measure token cost. Bodies are discarded.
+5. Fetch every candidate URL in parallel via `fetcher.fetchAll(urls, { timeout: 10000 })` to validate reachability, measure token cost, and capture the body.
 6. Drop any result whose fetch failed (network error) or whose content extraction errored (404, timeout, etc.).
-7. Build the result listing — one block per surviving result with `URL — title (N tokens)` followed by `  snippet`. Header reports `valid/total` count when any were dropped.
-8. Store the listing at `entry.resultPath` with state `"resolved"` and `{ query }` attributes.
+7. For each survivor, archive the body as an `<https>` entry: `path: cleanUrl`, `state: "resolved"`, `visibility: "archived"`, body `# {title}\n\n{content}`, attributes `{title, excerpt, byline, siteName}`.
+8. Build the result listing as a markdown bullet list — `* URL — title (N tokens)` per survivor with an indented snippet line. Header reports `valid/total` count when any were dropped. The `*` prefix is load-bearing — it makes the body unambiguously rendered output, not something the model would emit as a tool.
+9. Store the listing at `entry.resultPath` with state `"resolved"` and `{ query }` attributes.
 
-No `https://` entries are created. Pages become entries only when the model emits `<get>` on a result URL — at which point this handler fetches again (intentional: bodies were discarded after validation).
+A subsequent `<get>` on any listed URL hits the existing-entry short-circuit in the get handler and is promoted to `visible` without a second round trip.
 
 ### Handler: `get` (priority 5)
 
@@ -274,9 +275,9 @@ Model emits <search>query</search>
   → hooks.tools.dispatch("search", entry, rummy)
     → RummyWeb#handleSearch fires
     → Honors noWeb (403) and per-turn search cap (429)
-    → Fetches all candidate URLs via fetchAll() to validate + measure tokens
-    → Discards bodies; drops unreachable results
-    → Stores (URL — title (N tokens) / snippet) listing at entry.resultPath
+    → Fetches all candidate URLs in parallel via fetchAll() to validate + measure tokens
+    → Archives each survivor as an <https> entry (visibility: "archived"); drops unreachable results
+    → Stores (* URL — title (N tokens) / snippet) bullet listing at entry.resultPath
   → hooks.entry.created.emit(entry)
 ```
 
@@ -360,15 +361,15 @@ All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x8
 
 ### Token-cost listing on search
 
-Each candidate URL is fetched (concurrently, 5s timeout) so the listing can show real page token counts instead of snippet tokens (~140) vs. page tokens (~20K). Bodies are discarded after measurement — the model commits to reading by emitting `<get>`, which fetches again. This trades one extra fetch on commit for the cache benefit of never persisting unread page bodies in run state.
+Each candidate URL is fetched concurrently (10s timeout) so the listing can show real page token counts instead of snippet tokens (~140) vs. page tokens (~20K). The fetched body is archived as an `<https>` entry (`visibility: "archived"`) keyed by the cleaned URL, so a subsequent `<get>` on a listed result is a pure visibility flip — no second round trip. The trade-off: every reachable candidate's body lives in run state from the moment search returns, even if the model never promotes it. The win: deterministic `<get>` latency and a guarantee that listed URLs are fetchable.
 
 ### `<get>` is the universal fetch verb
 
-`<search>` no longer creates `https://` entries. Pages become entries only when the model `<get>`s them — whether the URL came from a search result, page prose, or operator input. `handleGet` short-circuits if the URL is already a known entry (defers to the core handler for promotion); otherwise it fetches.
+Pages become run entries through two paths: archived during `<search>` prefetch, or fetched on demand by `<get>` when the URL came from page prose or operator input. `handleGet` short-circuits if the URL is already a known entry (defers to the core handler for promotion); otherwise it fetches. After search has run, the short-circuit is the common case.
 
 ### Per-turn search cap
 
-Each search fetches every candidate (validation + token measurement) and is therefore expensive. `RUMMY_WEB_SEARCH_MAX` throttles searches per turn while the overall command cap stays generous for cheap verbs. Exceeding the cap emits an error via the `hooks.error.log` hook with status 429.
+Each search fetches and archives every candidate and is therefore expensive — both in network time and in run-state size. `RUMMY_WEB_SEARCH_MAX` throttles searches per turn while the overall command cap stays generous for cheap verbs. Exceeding the cap emits an error via the `hooks.error.log` hook with status 429.
 
 ### Web entries as `data` category
 
@@ -396,7 +397,7 @@ SearXNG (self-hosted, private) and Brave Search API (hosted, API key) both norma
 RUMMY_FETCH_TIMEOUT
   ├ WebFetcher.fetch()     — page.goto({ timeout })
   ├ WebFetcher.search()    — fetch({ signal: AbortSignal.timeout() })
-  └ WebFetcher.fetchAll()  — default 5000ms per page (overridable)
+  └ WebFetcher.fetchAll()  — default 10000ms per page (overridable)
 ```
 
 `RUMMY_FETCH_TIMEOUT` is read from the environment with no hardcoded default — the server is expected to set it.

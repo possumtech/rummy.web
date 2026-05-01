@@ -106,7 +106,7 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 	});
 
 	describe("search returns candidates as a single log entry (@plugins_handler_outcomes)", () => {
-		it("emits one log entry with (URL, title, snippet, tokens) listing; creates no <https> entries", async () => {
+		it("emits one log entry with (URL, title, snippet, tokens) listing; lands each fetched page as an archived <https> entry", async () => {
 			const handler = captureHandler();
 			const setCalls = [];
 			const rummy = {
@@ -179,21 +179,34 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			const pageWrites = setCalls.filter((c) => c.path?.startsWith("https://"));
 			assert.strictEqual(
 				pageWrites.length,
-				0,
-				"search creates no <https> data entries — fetching is <get>'s job",
+				2,
+				"search lands one archived entry per successfully fetched URL",
+			);
+			for (const w of pageWrites) {
+				assert.equal(w.visibility, "archived");
+				assert.equal(w.state, "resolved");
+				assert.ok(w.body.length > 0, "archived entry carries the fetched body");
+			}
+			assert.ok(
+				pageWrites.some((w) => w.path === "https://a.example/page"),
+				"first result archived under its URL",
+			);
+			assert.ok(
+				pageWrites.some((w) => w.path === "https://b.example/page"),
+				"second result archived under its URL",
 			);
 
 			const logWrite = setCalls.find((c) => c.path === "log://turn_5/search/q");
 			assert.ok(logWrite, "search wrote its log entry");
 			assert.ok(
-				logWrite.body.includes("https://a.example/page"),
-				"first URL listed",
+				logWrite.body.includes("* https://a.example/page"),
+				"first result prefixed with markdown bullet (* URL …)",
 			);
 			assert.ok(logWrite.body.includes("Page A"), "title listed");
 			assert.ok(logWrite.body.includes("snippet A"), "snippet listed");
 			assert.ok(
-				logWrite.body.includes("https://b.example/page"),
-				"second URL listed",
+				logWrite.body.includes("* https://b.example/page"),
+				"second result prefixed with markdown bullet",
 			);
 			assert.ok(
 				/\(\d+ tokens\)/.test(logWrite.body),
@@ -259,14 +272,20 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			const logWrite = setCalls.find((c) => c.path === "log://turn_5/search/q");
 			assert.ok(logWrite);
 			assert.ok(
-				logWrite.body.includes(
-					'1 of 3 results for "q" (2 unreachable)',
-				),
+				logWrite.body.includes('1 of 3 results for "q" (2 unreachable)'),
 				"header reports valid/total count and unreachable count",
 			);
 			assert.ok(logWrite.body.includes("https://ok.example/page"));
 			assert.ok(!logWrite.body.includes("https://gone.example/404"));
 			assert.ok(!logWrite.body.includes("https://timeout.example/page"));
+
+			const pageWrites = setCalls.filter((c) => c.path?.startsWith("https://"));
+			assert.deepEqual(
+				pageWrites.map((w) => w.path),
+				["https://ok.example/page"],
+				"only successfully-fetched URLs land as archived entries",
+			);
+			assert.equal(pageWrites[0].visibility, "archived");
 		});
 	});
 

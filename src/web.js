@@ -11,9 +11,9 @@ function countTokens(text) {
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web (ONE per turn)
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (limit results)
-* Results listed in the search's log entry as: \`URL — title (N tokens)\` followed by an indented snippet. Token count is the page's real cost if you <get> it; use it to pick.
+* Results listed in the search's log entry as a markdown bullet list — \`* URL — title (N tokens)\` per candidate, with an indented snippet line beneath. Token count is the page's real cost if you <get> it; use it to pick.
 * Unreachable URLs are dropped; the header reports \`N of M results (M-N unreachable)\` when any were filtered.
-* Use <get path="https://example.com/page"/> on a result URL to fetch the full page.
+* Use <get path="https://example.com/page"/> on a result URL to promote it into context (already fetched during search; <get> is a pure promote, no second round trip).
 * **ONE \`<search>\` per turn.** Each call returns 5–12 candidate URLs. Additional searches the same turn are refused.`;
 
 export default class RummyWeb {
@@ -93,12 +93,16 @@ export default class RummyWeb {
 		const limit = attrs.results || 12;
 		const results = await this.#getFetcher().search(query, { limit });
 
-		// Fetch each candidate to validate + measure token cost. Bodies
-		// are discarded; the model re-fetches via <get> when it commits to
-		// reading. The token total guides the model's "which is worth
-		// promoting" choice in the search log entry's listing.
+		// Fetch each candidate in parallel and STORE the body as an
+		// archived run entry. Two consequences: every URL that survives
+		// this pass is guaranteed reachable (the model can't pick an
+		// unreachable result), and a subsequent <get> on the URL is a
+		// pure visibility flip — no second round trip. Pages that don't
+		// load within the deadline are dropped from the listing; the
+		// header reports the count. The token total guides the model's
+		// "which is worth promoting" choice.
 		const urls = results.map((r) => WebFetcher.cleanUrl(r.url));
-		const pages = await this.#getFetcher().fetchAll(urls, { timeout: 5000 });
+		const pages = await this.#getFetcher().fetchAll(urls, { timeout: 10000 });
 
 		const valid = [];
 		for (let i = 0; i < results.length; i++) {
@@ -106,8 +110,22 @@ export default class RummyWeb {
 			const page = pages[i];
 			const fetched = page.status === "fulfilled" ? page.value : null;
 			if (!fetched || fetched.error) continue;
+			const url = urls[i];
+			const titleHeader = fetched.title ? `# ${fetched.title}\n\n` : "";
+			await rummy.set({
+				path: url,
+				body: titleHeader + (fetched.content || ""),
+				state: "resolved",
+				visibility: "archived",
+				attributes: {
+					title: fetched.title,
+					excerpt: fetched.excerpt,
+					byline: fetched.byline,
+					siteName: fetched.siteName,
+				},
+			});
 			valid.push({
-				url: urls[i],
+				url,
 				title: fetched.title || r.title,
 				snippet: r.snippet,
 				tokens: countTokens(fetched.content),
@@ -118,12 +136,16 @@ export default class RummyWeb {
 			valid.length === results.length
 				? `${results.length} results for "${query}"`
 				: `${valid.length} of ${results.length} results for "${query}" (${results.length - valid.length} unreachable)`;
-		const lines = [header, ""];
+		// Markdown bullet list, NOT XML or tool-shape: leading `*` is the
+		// load-bearing signal that this body is rendered output, not
+		// anything the model would type as a query. The same URL/title/
+		// tokens metadata as before, behind a marker the model has zero
+		// training-prior for emitting as a tool.
+		const lines = [header];
 		for (const r of valid) {
 			const head = r.title ? `${r.url} — ${r.title}` : r.url;
-			lines.push(`${head} (${r.tokens} tokens)`);
+			lines.push(`* ${head} (${r.tokens} tokens)`);
 			if (r.snippet) lines.push(`  ${r.snippet}`);
-			lines.push("");
 		}
 
 		await rummy.set({
