@@ -68,6 +68,18 @@ function toWikiMobileUrl(url) {
 	return `${match[1]}/api/rest_v1/page/mobile-html/${match[2]}`;
 }
 
+// https://github.com/{owner}/{repo}/blob/{ref}/{path} → raw.githubusercontent.com.
+// The blob page is a JS-rendered SPA whose CSP refuses Readability injection;
+// raw serves the file's bytes, which the non-HTML extraction path handles.
+const GITHUB_BLOB_PATTERN =
+	/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/(.+)$/;
+
+function toGithubRawUrl(url) {
+	const match = GITHUB_BLOB_PATTERN.exec(url);
+	if (!match) return null;
+	return `https://raw.githubusercontent.com/${match[1]}/${match[2]}/${match[3]}`;
+}
+
 export default class WebFetcher {
 	#browser = null;
 	#context = null;
@@ -116,15 +128,16 @@ export default class WebFetcher {
 	}
 
 	/**
-	 * Fetch a single page. Opens a tab in the persistent context,
-	 * runs Readability, converts to markdown, closes the tab.
+	 * Fetch a single page. Opens a tab in the persistent context, extracts
+	 * content (Readability + markdown for HTML; raw text for everything
+	 * else), closes the tab.
 	 */
 	async fetch(
 		rawUrl,
 		{ timeout = FETCH_TIMEOUT, waitUntil = "networkidle" } = {},
 	) {
 		const url = WebFetcher.cleanUrl(rawUrl);
-		const fetchUrl = toWikiMobileUrl(url) || url;
+		const fetchUrl = toWikiMobileUrl(url) || toGithubRawUrl(url) || url;
 		const context = await this.#getContext();
 		const page = await context.newPage();
 
@@ -147,7 +160,7 @@ export default class WebFetcher {
 		return Promise.allSettled(
 			urls.map(async (rawUrl) => {
 				const url = WebFetcher.cleanUrl(rawUrl);
-				const fetchUrl = toWikiMobileUrl(url) || url;
+				const fetchUrl = toWikiMobileUrl(url) || toGithubRawUrl(url) || url;
 				const start = Date.now();
 				const page = await context.newPage();
 				try {
@@ -179,6 +192,26 @@ export default class WebFetcher {
 		const status = response?.status() ?? 0;
 		if (status >= 400)
 			return { url, title: null, content: null, error: `HTTP ${status}` };
+
+		// Readability needs an HTML DOM with executable scripts. Non-HTML
+		// responses (text/plain source files, JSON, raw configs, …) get the
+		// rendered text directly — Chromium wraps text/* in a synthetic
+		// <pre>, so document.body.innerText returns the bytes verbatim.
+		const contentType = response?.headers()?.["content-type"] || "";
+		const isHtml = /^(text\/html|application\/xhtml\+xml)/i.test(contentType);
+		if (!isHtml) {
+			const text = await page.evaluate(() => document.body?.innerText ?? "");
+			const basename =
+				new URL(url).pathname.split("/").filter(Boolean).pop() || url;
+			return {
+				url,
+				title: basename,
+				content: text,
+				excerpt: null,
+				byline: null,
+				siteName: null,
+			};
+		}
 
 		await page.addScriptTag({ path: READABILITY_PATH });
 		const article = await page.evaluate(() => {

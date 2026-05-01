@@ -71,8 +71,8 @@ When `<get>` targets an `http://` or `https://` URL, this plugin intercepts at p
 ```
 
 - If the URL is already a known entry **and was fetched within the last 10 minutes**, this handler skips the network call and lets the core get handler promote the existing entry. Stale entries (older than 10 min) fall through to a fresh fetch and overwrite the archive.
-- Otherwise, fetches the page with headless Chromium, extracts content via Readability, converts to markdown via Turndown, and stores the entry.
-- Wikipedia URLs are automatically redirected to the mobile-html API for cleaner content.
+- Otherwise, fetches the page with headless Chromium. HTML responses go through Readability + Turndown for clean markdown; non-HTML responses (`text/plain`, `application/json`, source files, …) are read as raw text.
+- Wikipedia URLs are redirected to the mobile-html API for cleaner content. GitHub `blob/` URLs are redirected to `raw.githubusercontent.com` so source files come through as their raw bytes instead of the JS-rendered SPA (whose CSP forbids Readability injection anyway).
 - All fetches use mobile device emulation (Pixel 5) for lighter page responses.
 
 This makes `<get>` the universal URL-fetching verb regardless of where the URL came from — search results, page prose, or operator input.

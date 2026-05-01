@@ -309,15 +309,19 @@ Single browser instance with a persistent context shared across all fetches. Ben
 
 ### `fetch(url, opts?)`
 
-Opens a tab in the persistent context, navigates, runs Readability, converts to markdown, closes the tab. Options: `timeout` (default `FETCH_TIMEOUT`), `waitUntil` (default `"networkidle"`).
+Opens a tab in the persistent context, navigates, extracts content (HTML branch or non-HTML branch — see `#extract`), closes the tab. Options: `timeout` (default `FETCH_TIMEOUT`), `waitUntil` (default `"networkidle"`).
 
 ### `fetchAll(urls, opts?)`
 
-Opens concurrent tabs in the shared context. Returns `Promise.allSettled`. Each page logs fetch time and content size. Default timeout: 5s (aggressive — `<search>` uses this to validate candidates and measure token cost; failures are dropped from the listing).
+Opens concurrent tabs in the shared context. Returns `Promise.allSettled`. Each page logs fetch time and content size. Default timeout: 10s (`<search>` uses this to validate candidates and measure token cost; failures are dropped from the listing).
 
 ### `#extract(url, page, response)`
 
-Shared extraction logic: HTTP status check → inject Readability.js → `page.evaluate()` → Turndown conversion.
+HTTP status check → branch on `Content-Type`:
+- **HTML** (`text/html` or `application/xhtml+xml`): inject Readability.js → `page.evaluate()` → Turndown conversion. If Readability returns null, fall through to first 5000 chars of raw HTML.
+- **Non-HTML** (everything else — `text/plain`, `application/json`, source files, …): read `document.body.innerText` directly. Title is the URL's basename. `excerpt`/`byline`/`siteName` are null.
+
+The non-HTML branch exists because Chromium doesn't execute scripts on non-HTML documents, so Readability injection is a no-op there; and because Readability against a single `<pre>` of source code is useless even when it does run.
 
 ### Search Backends
 
@@ -336,14 +340,14 @@ Headers: X-Subscription-Token, Accept: application/json
 
 Both normalize to `[{ title, url, snippet, engine }]`.
 
-### Wikipedia Optimization
+### URL Normalization
 
-URLs matching `*.wikipedia.org/wiki/*` are rewritten to the mobile-html API:
+URLs are normalized to bytes-friendly hosts before fetch:
 
-```
-https://en.wikipedia.org/wiki/Foo
-→ https://en.wikipedia.org/api/rest_v1/page/mobile-html/Foo
-```
+| Pattern | Rewrite | Reason |
+|---|---|---|
+| `*.wikipedia.org/wiki/*` | `*.wikipedia.org/api/rest_v1/page/mobile-html/*` | Pre-cleaned content; eliminates ~40% of noise |
+| `github.com/{owner}/{repo}/blob/{ref}/{path}` | `raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}` | The blob page is a JS-rendered SPA with CSP that blocks Readability; raw serves the file's bytes directly |
 
 ### Mobile Device Emulation
 
@@ -392,9 +396,9 @@ Fetched pages register as `data` category (alongside files and knowledge), not `
 
 Single browser context shared across all fetches within a session. Warm DNS, connection reuse, and shared state. 15-minute idle timeout prevents resource leaks.
 
-### Wikipedia mobile-html redirect
+### URL rewrites for known hostile hosts
 
-Wikipedia's standard pages have deeply interleaved content and metadata. The mobile-html API returns pre-cleaned content — eliminates ~40% of noise.
+Wikipedia's standard pages have deeply interleaved content and metadata; the mobile-html API returns pre-cleaned content (~40% less noise). GitHub's `blob/` view is a JS-rendered SPA whose Content-Security-Policy refuses inline script injection, breaking Readability — and even if it didn't, the SPA chrome would dominate the extraction. Rewriting `github.com/.../blob/...` to `raw.githubusercontent.com` sends the request to the file bytes directly, where the non-HTML extraction branch handles the response. Both rewrites are URL-shape transforms, not response-time fallbacks: the failure case is that the model couldn't read source code at all.
 
 ### Mobile device emulation
 
