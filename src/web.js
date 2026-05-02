@@ -63,6 +63,20 @@ export default class RummyWeb {
 		return this.#fetcher;
 	}
 
+	// Wire fetcher.kill() to rummy.signal — see WebFetcher#kill for why.
+	// Returns a cleanup fn for try/finally so the listener never outlives
+	// the handler.
+	#armAbortKill(rummy, fetcher) {
+		const { signal } = rummy;
+		if (signal.aborted) {
+			fetcher.kill();
+			return () => {};
+		}
+		const onAbort = () => fetcher.kill();
+		signal.addEventListener("abort", onAbort, { once: true });
+		return () => signal.removeEventListener("abort", onAbort);
+	}
+
 	async #handleSearch(entry, rummy) {
 		const attrs = entry.attributes || {};
 		const query = attrs.path || entry.body;
@@ -104,7 +118,17 @@ export default class RummyWeb {
 		}
 
 		const limit = attrs.results || 12;
-		const results = await this.#getFetcher().search(query, { limit });
+		const fetcher = this.#getFetcher();
+		const disarm = this.#armAbortKill(rummy, fetcher);
+		try {
+			return await this.#runSearch(entry, rummy, fetcher, query, limit);
+		} finally {
+			disarm();
+		}
+	}
+
+	async #runSearch(entry, rummy, fetcher, query, limit) {
+		const results = await fetcher.search(query, { limit });
 
 		// Fetch each candidate in parallel and STORE the body as an
 		// archived run entry. Two consequences: every URL that survives
@@ -133,7 +157,7 @@ export default class RummyWeb {
 		}
 		const fetchedPages =
 			toFetch.length > 0
-				? await this.#getFetcher().fetchAll(toFetch, { timeout: 10000 })
+				? await fetcher.fetchAll(toFetch, { timeout: 10000 })
 				: [];
 		const fetchedByUrl = new Map();
 		for (let i = 0; i < toFetch.length; i++) {
@@ -233,12 +257,16 @@ export default class RummyWeb {
 			return;
 		}
 
+		const fetcher = this.#getFetcher();
+		const disarm = this.#armAbortKill(rummy, fetcher);
 		let fetched;
 		try {
-			fetched = await this.#getFetcher().fetch(clean);
+			fetched = await fetcher.fetch(clean);
 		} catch (err) {
 			console.warn(`[RUMMY] Fetch crashed: ${clean} — ${err.message}`);
 			return;
+		} finally {
+			disarm();
 		}
 		if (fetched.error) {
 			console.warn(`[RUMMY] Fetch failed: ${clean} — ${fetched.error}`);

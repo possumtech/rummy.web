@@ -147,7 +147,9 @@ export default class WebFetcher {
 		} catch (err) {
 			return { url, title: null, content: null, error: err.message };
 		} finally {
-			await page.close();
+			// Browser may already be dead via kill() on abort; tolerate the
+			// "Target closed" reject rather than masking the real failure.
+			await page.close().catch(() => {});
 		}
 	}
 
@@ -316,6 +318,31 @@ export default class WebFetcher {
 			await this.#browser.close().catch(() => {});
 			this.#browser = null;
 		}
+		this.#launching = null;
+	}
+
+	// Synchronous force-kill. `page.goto` honors its own `timeout` opt, not
+	// the run's AbortSignal, so a graceful close() during shutdown awaits a
+	// browser teardown blocked behind an in-flight goto — the supervisor's
+	// outer kill deadline expires before run artifacts finish writing.
+	// SIGKILLing chromium collapses every in-flight goto immediately; the
+	// handlers' catch blocks return error objects and shutdown proceeds.
+	kill() {
+		if (this.#idleTimer) {
+			clearTimeout(this.#idleTimer);
+			this.#idleTimer = null;
+		}
+		const proc = this.#browser?.process();
+		if (proc) {
+			try {
+				proc.kill("SIGKILL");
+			} catch {
+				// Process already exited (ESRCH) — the only realistic failure
+				// mode for SIGKILL on a tracked subprocess.
+			}
+		}
+		this.#browser = null;
+		this.#context = null;
 		this.#launching = null;
 	}
 }

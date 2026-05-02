@@ -39,6 +39,7 @@ function makeRummy({ priorSearches = [] } = {}) {
 		runId: 1,
 		loopId: 1,
 		sequence: 5,
+		signal: new AbortController().signal,
 		entries: {
 			set: async (payload) => upserted.push(payload),
 		},
@@ -118,6 +119,7 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 				runId: 1,
 				loopId: 1,
 				sequence: 5,
+				signal: new AbortController().signal,
 				entries: { set: async () => {} },
 				getEntries: async (pattern) => {
 					if (pattern.startsWith("log://")) return [];
@@ -230,6 +232,7 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 				runId: 1,
 				loopId: 1,
 				sequence: 5,
+				signal: new AbortController().signal,
 				entries: { set: async () => {} },
 				getEntries: async () => [],
 				set: async (payload) => setCalls.push(payload),
@@ -335,6 +338,7 @@ describe("RummyWeb — http/https cache (10 min TTL)", () => {
 			runId: 1,
 			loopId: 1,
 			sequence: 5,
+			signal: new AbortController().signal,
 			entries: { set: async () => {} },
 			getEntries: async (path) => {
 				if (path === "https://a.example/page") return [fresh];
@@ -403,6 +407,7 @@ describe("RummyWeb — http/https cache (10 min TTL)", () => {
 			runId: 1,
 			loopId: 1,
 			sequence: 5,
+			signal: new AbortController().signal,
 			entries: { set: async () => {} },
 			getEntries: async (path) => {
 				if (path === "https://a.example/page") return [stale];
@@ -467,6 +472,7 @@ describe("RummyWeb — http/https cache (10 min TTL)", () => {
 			runId: 1,
 			loopId: 1,
 			sequence: 5,
+			signal: new AbortController().signal,
 			entries: { set: async () => {} },
 			getEntries: async (path) => {
 				if (path === "https://a.example/page") return [fresh];
@@ -508,6 +514,7 @@ describe("RummyWeb — http/https cache (10 min TTL)", () => {
 			runId: 1,
 			loopId: 1,
 			sequence: 5,
+			signal: new AbortController().signal,
 			entries: { set: async () => {} },
 			getEntries: async (path) => {
 				if (path === "https://a.example/page") return [stale];
@@ -551,6 +558,7 @@ describe("RummyWeb — http/https cache (10 min TTL)", () => {
 			runId: 1,
 			loopId: 1,
 			sequence: 5,
+			signal: new AbortController().signal,
 			entries: { set: async () => {} },
 			getEntries: async () => [],
 			set: async (payload) => setCalls.push(payload),
@@ -574,5 +582,201 @@ describe("RummyWeb — http/https cache (10 min TTL)", () => {
 			typeof setCalls[0].attributes.fetched_at === "number",
 			"first fetch stamps fetched_at as a number",
 		);
+	});
+});
+
+// rummy.signal abort handling: an in-flight search/get must not stall
+// shutdown behind page.goto's own timeout. The plugin SIGKILLs chromium
+// when the signal aborts.
+describe("RummyWeb — abort signal hard-kills chromium", () => {
+	it("aborting mid-search calls fetcher.kill() before search resolves", async () => {
+		const handler = captureHandler();
+		const controller = new AbortController();
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			signal: controller.signal,
+			entries: { set: async () => {} },
+			getEntries: async () => [],
+			set: async () => {},
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const orig = {
+			search: WebFetcher.prototype.search,
+			fetchAll: WebFetcher.prototype.fetchAll,
+			kill: WebFetcher.prototype.kill,
+		};
+		const killCalls = [];
+		// Defer search so we can abort while it's in flight.
+		let releaseSearch;
+		const searchPromise = new Promise((r) => {
+			releaseSearch = r;
+		});
+		WebFetcher.prototype.search = () => searchPromise;
+		WebFetcher.prototype.fetchAll = async () => [];
+		WebFetcher.prototype.kill = function () {
+			killCalls.push(Date.now());
+		};
+
+		try {
+			const handlerPromise = handler(
+				{ attributes: { path: "q" }, resultPath: "log://turn_5/search/q" },
+				rummy,
+			);
+			// Yield once so the handler reaches `await fetcher.search(...)`
+			// and has a chance to register the abort listener.
+			await Promise.resolve();
+			controller.abort();
+			assert.equal(killCalls.length, 1, "abort fires kill exactly once");
+			releaseSearch([]);
+			await handlerPromise;
+		} finally {
+			WebFetcher.prototype.search = orig.search;
+			WebFetcher.prototype.fetchAll = orig.fetchAll;
+			WebFetcher.prototype.kill = orig.kill;
+		}
+	});
+
+	it("pre-aborted signal kills synchronously when handler enters network path", async () => {
+		const handler = captureHandler();
+		const controller = new AbortController();
+		controller.abort();
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			signal: controller.signal,
+			entries: { set: async () => {} },
+			getEntries: async () => [],
+			set: async () => {},
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const orig = {
+			search: WebFetcher.prototype.search,
+			fetchAll: WebFetcher.prototype.fetchAll,
+			kill: WebFetcher.prototype.kill,
+		};
+		const killCalls = [];
+		WebFetcher.prototype.search = async () => [];
+		WebFetcher.prototype.fetchAll = async () => [];
+		WebFetcher.prototype.kill = function () {
+			killCalls.push(1);
+		};
+
+		try {
+			await handler(
+				{ attributes: { path: "q" }, resultPath: "log://turn_5/search/q" },
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.search = orig.search;
+			WebFetcher.prototype.fetchAll = orig.fetchAll;
+			WebFetcher.prototype.kill = orig.kill;
+		}
+		assert.equal(killCalls.length, 1, "pre-aborted signal triggers one kill");
+	});
+
+	it("disarm removes the listener; aborting after success is a no-op", async () => {
+		const handler = captureHandler();
+		const controller = new AbortController();
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			signal: controller.signal,
+			entries: { set: async () => {} },
+			getEntries: async () => [],
+			set: async () => {},
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const orig = {
+			search: WebFetcher.prototype.search,
+			fetchAll: WebFetcher.prototype.fetchAll,
+			kill: WebFetcher.prototype.kill,
+		};
+		const killCalls = [];
+		WebFetcher.prototype.search = async () => [];
+		WebFetcher.prototype.fetchAll = async () => [];
+		WebFetcher.prototype.kill = function () {
+			killCalls.push(1);
+		};
+
+		try {
+			await handler(
+				{ attributes: { path: "q" }, resultPath: "log://turn_5/search/q" },
+				rummy,
+			);
+			controller.abort();
+		} finally {
+			WebFetcher.prototype.search = orig.search;
+			WebFetcher.prototype.fetchAll = orig.fetchAll;
+			WebFetcher.prototype.kill = orig.kill;
+		}
+		assert.equal(
+			killCalls.length,
+			0,
+			"abort after handler completion does not fire kill",
+		);
+	});
+
+	it("<get>: aborting mid-fetch calls kill before fetch resolves", async () => {
+		const handlers = captureHandlers();
+		const handleGet = handlers.get;
+		const controller = new AbortController();
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			signal: controller.signal,
+			entries: { set: async () => {} },
+			getEntries: async () => [],
+			set: async () => {},
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const orig = {
+			fetch: WebFetcher.prototype.fetch,
+			kill: WebFetcher.prototype.kill,
+		};
+		const killCalls = [];
+		let releaseFetch;
+		const fetchPromise = new Promise((r) => {
+			releaseFetch = r;
+		});
+		WebFetcher.prototype.fetch = () => fetchPromise;
+		WebFetcher.prototype.kill = function () {
+			killCalls.push(1);
+		};
+
+		try {
+			const handlerPromise = handleGet(
+				{ attributes: { path: "https://x.example/p" } },
+				rummy,
+			);
+			await Promise.resolve();
+			controller.abort();
+			assert.equal(killCalls.length, 1);
+			releaseFetch({
+				url: "https://x.example/p",
+				title: "X",
+				content: "body",
+			});
+			await handlerPromise;
+		} finally {
+			WebFetcher.prototype.fetch = orig.fetch;
+			WebFetcher.prototype.kill = orig.kill;
+		}
 	});
 });
