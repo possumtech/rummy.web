@@ -56,6 +56,17 @@ export default class RummyWeb {
 			docsMap.search = SEARCH_DOCS;
 			return docsMap;
 		});
+
+		// Per-run context cleanup: close the run's BrowserContext when the
+		// run ends so the next run starts with a fresh cookie jar / cache.
+		// Both `act` and `ask` channels fire `completed` for any given run;
+		// either path arrives here.
+		const onCompleted = ({ runId }) => {
+			if (!runId) throw new Error("RummyWeb: completed event missing runId");
+			this.#fetcher?.closeContext(runId);
+		};
+		hooks.act.completed.on(onCompleted);
+		hooks.ask.completed.on(onCompleted);
 	}
 
 	#getFetcher() {
@@ -63,16 +74,18 @@ export default class RummyWeb {
 		return this.#fetcher;
 	}
 
-	// Wire fetcher.kill() to rummy.signal — see WebFetcher#kill for why.
-	// Returns a cleanup fn for try/finally so the listener never outlives
-	// the handler.
-	#armAbortKill(rummy, fetcher) {
-		const { signal } = rummy;
+	// Close the run's BrowserContext on abort so any in-flight page.goto
+	// rejects promptly with "Target closed" instead of blocking on its own
+	// timeout — see WebFetcher#closeContext for why. Browser stays warm
+	// for other runs. Returns a cleanup fn for try/finally so the listener
+	// never outlives the handler.
+	#armAbortClose(rummy, fetcher) {
+		const { signal, runId } = rummy;
 		if (signal.aborted) {
-			fetcher.kill();
+			fetcher.closeContext(runId);
 			return () => {};
 		}
-		const onAbort = () => fetcher.kill();
+		const onAbort = () => fetcher.closeContext(runId);
 		signal.addEventListener("abort", onAbort, { once: true });
 		return () => signal.removeEventListener("abort", onAbort);
 	}
@@ -119,7 +132,7 @@ export default class RummyWeb {
 
 		const limit = attrs.results || 12;
 		const fetcher = this.#getFetcher();
-		const disarm = this.#armAbortKill(rummy, fetcher);
+		const disarm = this.#armAbortClose(rummy, fetcher);
 		try {
 			return await this.#runSearch(entry, rummy, fetcher, query, limit);
 		} finally {
@@ -157,7 +170,10 @@ export default class RummyWeb {
 		}
 		const fetchedPages =
 			toFetch.length > 0
-				? await fetcher.fetchAll(toFetch, { timeout: 10000 })
+				? await fetcher.fetchAll(toFetch, {
+						timeout: 10000,
+						runId: rummy.runId,
+					})
 				: [];
 		const fetchedByUrl = new Map();
 		for (let i = 0; i < toFetch.length; i++) {
@@ -258,10 +274,10 @@ export default class RummyWeb {
 		}
 
 		const fetcher = this.#getFetcher();
-		const disarm = this.#armAbortKill(rummy, fetcher);
+		const disarm = this.#armAbortClose(rummy, fetcher);
 		let fetched;
 		try {
-			fetched = await fetcher.fetch(clean);
+			fetched = await fetcher.fetch(clean, { runId: rummy.runId });
 		} catch (err) {
 			console.warn(`[RUMMY] Fetch crashed: ${clean} — ${err.message}`);
 			return;

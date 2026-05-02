@@ -22,14 +22,14 @@ RUMMY_PLUGIN_WEB=@possumtech/rummy.web
 SearXNG (default):
 
 ```env
-RUMMY_SEARCH=searxng
-RUMMY_SEARXNG_URL=http://127.0.0.1:8888
+RUMMY_WEB_SEARCH_BACKEND=searxng
+RUMMY_WEB_SEARXNG_URL=http://127.0.0.1:8888
 ```
 
 Brave Search API:
 
 ```env
-RUMMY_SEARCH=brave
+RUMMY_WEB_SEARCH_BACKEND=brave
 BRAVE_API_KEY=your-api-key
 ```
 
@@ -38,11 +38,14 @@ BRAVE_API_KEY=your-api-key
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `RUMMY_PLUGIN_WEB` | Yes | — | Set to `@possumtech/rummy.web` to load |
-| `RUMMY_SEARCH` | No | `searxng` | Search backend: `searxng` or `brave` |
-| `RUMMY_SEARXNG_URL` | If searxng | — | SearXNG base URL |
+| `RUMMY_WEB_SEARCH_BACKEND` | No | `searxng` | Search backend: `searxng` or `brave` |
+| `RUMMY_WEB_SEARXNG_URL` | If searxng | — | SearXNG base URL |
 | `BRAVE_API_KEY` | If brave | — | Brave Search API key |
-| `RUMMY_FETCH_TIMEOUT` | No | — | Timeout in ms for page loads and search requests |
+| `RUMMY_WEB_FETCH_TIMEOUT` | No | — | Timeout in ms for page loads and search requests |
 | `RUMMY_WEB_SEARCH_MAX` | No | — | Max `<search>` commands per turn |
+| `RUMMY_WEB_PLAYWRIGHT_WS` | No | — | CDP `ws://` endpoint to connect to a shared chromium instead of launching locally |
+| `RUMMY_WEB_NO_SANDBOX` | No | — | `1` to drop chromium's user-namespace sandbox (docker-friendly; mild security tradeoff) |
+| `RUMMY_WEB_CHROMIUM_HEAP_MB` | No | — | Cap chromium's V8 old-space heap (MB) |
 
 ## Tools
 
@@ -85,16 +88,20 @@ This makes `<get>` the universal URL-fetching verb regardless of where the URL c
 import WebFetcher from "@possumtech/rummy.web/fetcher";
 
 const fetcher = new WebFetcher();
+const runId = 1; // required — scopes the BrowserContext (cookies, cache, etc.)
 
-const page = await fetcher.fetch("https://example.com");
+const page = await fetcher.fetch("https://example.com", { runId });
 console.log(page.title, page.content);
 
-const pages = await fetcher.fetchAll(["https://a.com", "https://b.com"], { timeout: 5000 });
+const pages = await fetcher.fetchAll(["https://a.com", "https://b.com"], { runId, timeout: 10000 });
 
 const results = await fetcher.search("query");
 
-await fetcher.close();
+fetcher.closeContext(runId); // free the run's context when done
+await fetcher.close();         // tear down the browser
 ```
+
+`runId` is load-bearing: each run gets its own `BrowserContext` (isolated cookies, localStorage, cache) on a shared chromium. Calling `fetch`/`fetchAll` without one throws.
 
 ### `WebFetcher.fetch(url, opts?)` Response
 

@@ -54,10 +54,21 @@ function wrapText(text, width) {
 	return lines.join("\n");
 }
 
-const FETCH_TIMEOUT = Number(process.env.RUMMY_FETCH_TIMEOUT);
+const FETCH_TIMEOUT = Number(process.env.RUMMY_WEB_FETCH_TIMEOUT);
 const IDLE_TIMEOUT = 15 * 60 * 1000; // 15 minutes
-const SEARCH_BACKEND = process.env.RUMMY_SEARCH;
+const SEARCH_BACKEND = process.env.RUMMY_WEB_SEARCH_BACKEND;
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
+// Connect to a remote chromium via CDP instead of launching a local one.
+// Lets multiple rummy processes share a single chromium; each process
+// still opens its own BrowserContext per run for isolation.
+const PLAYWRIGHT_WS = process.env.RUMMY_WEB_PLAYWRIGHT_WS;
+// Drop chromium's user-namespace sandbox. Avoids "no usable sandbox"
+// errors in containers that lack the namespaces; mild security tradeoff,
+// off by default.
+const NO_SANDBOX = process.env.RUMMY_WEB_NO_SANDBOX === "1";
+// Cap chromium's V8 old-space heap (MB). Useful on memory-constrained
+// hosts where chromium's default would crowd out other workloads.
+const CHROMIUM_HEAP_MB = Number(process.env.RUMMY_WEB_CHROMIUM_HEAP_MB) || null;
 
 // https://en.wikipedia.org/wiki/Foo → mobile-html API for clean content
 const WIKI_PATTERN = /^(https?:\/\/[a-z]+\.wikipedia\.org)\/wiki\/(.+)$/;
@@ -82,33 +93,71 @@ function toGithubRawUrl(url) {
 
 export default class WebFetcher {
 	#browser = null;
-	#context = null;
+	// One BrowserContext per run. Cookies, localStorage, and cache are
+	// scoped to the run that opened the context — no cross-run bleed.
+	// Keyed on rummy.runId; closed by closeContext() when the run ends
+	// or aborts. Browser process stays warm across all of them.
+	#contexts = new Map();
 	#launching = null;
 	#idleTimer = null;
 
 	/**
-	 * Get the persistent browser context, launching Playwright on first
-	 * call. The browser + context stay alive across requests (warm DNS,
-	 * cache, connections) and shut down after 15 minutes of inactivity.
+	 * Get or launch the chromium browser. Connects to a remote one via
+	 * RUMMY_WEB_PLAYWRIGHT_WS if set; otherwise launches locally with
+	 * docker-friendly chromium args. Single browser shared across all
+	 * runs in this fetcher; per-run isolation is at the context layer.
 	 */
-	async #getContext() {
+	async #getBrowser() {
 		this.#touchIdle();
-		if (this.#context) return this.#context;
-
-		if (!this.#browser) {
-			if (!this.#launching) {
-				this.#launching = (async () => {
-					const { chromium } = await import("playwright");
-					return chromium.launch({ headless: true });
-				})();
-			}
-			this.#browser = await this.#launching;
-			this.#launching = null;
+		if (this.#browser) return this.#browser;
+		if (!this.#launching) {
+			this.#launching = (async () => {
+				const { chromium } = await import("playwright");
+				if (PLAYWRIGHT_WS) return chromium.connect(PLAYWRIGHT_WS);
+				const args = ["--disable-gpu", "--disable-dev-shm-usage"];
+				if (NO_SANDBOX) args.push("--no-sandbox");
+				if (CHROMIUM_HEAP_MB) {
+					args.push(`--js-flags=--max-old-space-size=${CHROMIUM_HEAP_MB}`);
+				}
+				return chromium.launch({ headless: true, args });
+			})();
 		}
+		this.#browser = await this.#launching;
+		this.#launching = null;
+		return this.#browser;
+	}
 
+	/**
+	 * Get-or-create the BrowserContext for `runId`. Each run gets a
+	 * fresh cookie jar / cache / localStorage; cleared at run end via
+	 * closeContext().
+	 */
+	async #getContext(runId) {
+		if (!runId) throw new Error("WebFetcher: runId is required");
+		this.#touchIdle();
+		if (this.#contexts.has(runId)) return this.#contexts.get(runId);
+		const browser = await this.#getBrowser();
 		const { devices } = await import("playwright");
-		this.#context = await this.#browser.newContext(devices["Pixel 5"]);
-		return this.#context;
+		const ctx = await browser.newContext(devices["Pixel 5"]);
+		this.#contexts.set(runId, ctx);
+		return ctx;
+	}
+
+	/**
+	 * Drop the run's BrowserContext. Closing the context cascades to
+	 * any in-flight page.goto in pages owned by it — they reject with
+	 * "Target closed", handlers' catch blocks return error objects,
+	 * shutdown unblocks. Fire-and-forget; the close() promise itself
+	 * is allowed to resolve at its own pace.
+	 *
+	 * Called both at run end (clean cleanup hook) and on abort
+	 * (rummy.signal listener in the plugin).
+	 */
+	closeContext(runId) {
+		const ctx = this.#contexts.get(runId);
+		if (!ctx) return;
+		this.#contexts.delete(runId);
+		ctx.close().catch(() => {});
 	}
 
 	#touchIdle() {
@@ -128,17 +177,17 @@ export default class WebFetcher {
 	}
 
 	/**
-	 * Fetch a single page. Opens a tab in the persistent context, extracts
+	 * Fetch a single page. Opens a tab in the run's context, extracts
 	 * content (Readability + markdown for HTML; raw text for everything
 	 * else), closes the tab.
 	 */
 	async fetch(
 		rawUrl,
-		{ timeout = FETCH_TIMEOUT, waitUntil = "networkidle" } = {},
+		{ timeout = FETCH_TIMEOUT, waitUntil = "networkidle", runId } = {},
 	) {
 		const url = WebFetcher.cleanUrl(rawUrl);
 		const fetchUrl = toWikiMobileUrl(url) || toGithubRawUrl(url) || url;
-		const context = await this.#getContext();
+		const context = await this.#getContext(runId);
 		const page = await context.newPage();
 
 		try {
@@ -147,18 +196,19 @@ export default class WebFetcher {
 		} catch (err) {
 			return { url, title: null, content: null, error: err.message };
 		} finally {
-			// Browser may already be dead via kill() on abort; tolerate the
-			// "Target closed" reject rather than masking the real failure.
+			// Context may already be torn down via closeContext() on abort
+			// or run-end; tolerate the "Target closed" reject rather than
+			// masking the real failure.
 			await page.close().catch(() => {});
 		}
 	}
 
 	/**
-	 * Fetch multiple URLs as concurrent tabs in the persistent context.
-	 * Shared DNS, cache, and connections across all pages.
+	 * Fetch multiple URLs as concurrent tabs in the run's context.
+	 * Shared DNS, cache, and connections across all pages within the run.
 	 */
-	async fetchAll(urls, { timeout = 10000 } = {}) {
-		const context = await this.#getContext();
+	async fetchAll(urls, { timeout = 10000, runId } = {}) {
+		const context = await this.#getContext(runId);
 		return Promise.allSettled(
 			urls.map(async (rawUrl) => {
 				const url = WebFetcher.cleanUrl(rawUrl);
@@ -255,8 +305,8 @@ export default class WebFetcher {
 	}
 
 	async #searchSearxng(query, { limit, language }) {
-		const base = process.env.RUMMY_SEARXNG_URL;
-		if (!base) throw new Error("RUMMY_SEARXNG_URL not configured");
+		const base = process.env.RUMMY_WEB_SEARXNG_URL;
+		if (!base) throw new Error("RUMMY_WEB_SEARXNG_URL not configured");
 
 		const url = new URL("/search", base);
 		url.searchParams.set("q", query);
@@ -305,48 +355,24 @@ export default class WebFetcher {
 		}));
 	}
 
+	/**
+	 * Tear everything down: all per-run contexts then the browser. Called
+	 * by the 15-min idle timer and by tests at teardown. In CDP mode
+	 * browser.close() disconnects the local handle without shutting the
+	 * remote chromium down, so this is safe in both shapes.
+	 */
 	async close() {
 		if (this.#idleTimer) {
 			clearTimeout(this.#idleTimer);
 			this.#idleTimer = null;
 		}
-		if (this.#context) {
-			await this.#context.close().catch(() => {});
-			this.#context = null;
-		}
+		const contexts = [...this.#contexts.values()];
+		this.#contexts.clear();
+		await Promise.allSettled(contexts.map((c) => c.close()));
 		if (this.#browser) {
 			await this.#browser.close().catch(() => {});
 			this.#browser = null;
 		}
 		this.#launching = null;
-	}
-
-	// Force-cancel for shutdown. `page.goto` honors its own `timeout`
-	// opt, not the run's AbortSignal — a graceful awaited close() during
-	// shutdown waits on browser teardown blocked behind in-flight gotos
-	// and the supervisor's kill deadline expires before run artifacts
-	// finish writing. Playwright doesn't expose the chromium subprocess
-	// handle (1.59), so we can't SIGKILL directly. Calling close()
-	// fire-and-forget tears down the CDP connection: every in-flight
-	// goto rejects with "Target page, context or browser has been closed"
-	// almost immediately, the handlers' catch blocks return error objects,
-	// and shutdown proceeds. The browser process cleanup happens on its
-	// own timeline and doesn't block the run.
-	kill() {
-		if (this.#idleTimer) {
-			clearTimeout(this.#idleTimer);
-			this.#idleTimer = null;
-		}
-		const browser = this.#browser;
-		this.#browser = null;
-		this.#context = null;
-		this.#launching = null;
-		if (browser) {
-			// Fire-and-forget: the contract is that in-flight gotos reject
-			// promptly (CDP teardown does that synchronously); the close()
-			// promise itself races process exit and we don't care about
-			// its outcome.
-			browser.close({ reason: "rummy run aborted" }).catch(() => {});
-		}
 	}
 }

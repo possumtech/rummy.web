@@ -7,6 +7,10 @@ import RummyWeb from "./web.js";
 
 function captureHandlers() {
 	const handlers = {};
+	const completedListeners = { act: [], ask: [] };
+	const makeEvent = (channel) => ({
+		on: (fn) => completedListeners[channel].push(fn),
+	});
 	const core = {
 		hooks: {
 			tools: {
@@ -16,12 +20,17 @@ function captureHandlers() {
 				},
 				onView: () => {},
 			},
+			act: { completed: makeEvent("act") },
+			ask: { completed: makeEvent("ask") },
 		},
 		registerScheme: () => {},
 		on: () => {},
 		filter: () => {},
 	};
 	new RummyWeb(core);
+	handlers._fireCompleted = (channel, payload) => {
+		for (const fn of completedListeners[channel]) fn(payload);
+	};
 	return handlers;
 }
 
@@ -586,14 +595,15 @@ describe("RummyWeb — http/https cache (10 min TTL)", () => {
 });
 
 // rummy.signal abort handling: an in-flight search/get must not stall
-// shutdown behind page.goto's own timeout. The plugin SIGKILLs chromium
-// when the signal aborts.
-describe("RummyWeb — abort signal hard-kills chromium", () => {
-	it("aborting mid-search calls fetcher.kill() before search resolves", async () => {
+// shutdown behind page.goto's own timeout. The plugin closes the run's
+// BrowserContext when the signal aborts — collapses in-flight gotos
+// promptly, leaves the browser warm for other runs.
+describe("RummyWeb — abort signal closes the run's context", () => {
+	it("aborting mid-search calls fetcher.closeContext(runId) before search resolves", async () => {
 		const handler = captureHandler();
 		const controller = new AbortController();
 		const rummy = {
-			runId: 1,
+			runId: 42,
 			loopId: 1,
 			sequence: 5,
 			signal: controller.signal,
@@ -608,9 +618,9 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		const orig = {
 			search: WebFetcher.prototype.search,
 			fetchAll: WebFetcher.prototype.fetchAll,
-			kill: WebFetcher.prototype.kill,
+			closeContext: WebFetcher.prototype.closeContext,
 		};
-		const killCalls = [];
+		const closeCalls = [];
 		// Defer search so we can abort while it's in flight.
 		let releaseSearch;
 		const searchPromise = new Promise((r) => {
@@ -618,9 +628,7 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		});
 		WebFetcher.prototype.search = () => searchPromise;
 		WebFetcher.prototype.fetchAll = async () => [];
-		WebFetcher.prototype.kill = () => {
-			killCalls.push(Date.now());
-		};
+		WebFetcher.prototype.closeContext = (id) => closeCalls.push(id);
 
 		try {
 			const handlerPromise = handler(
@@ -631,22 +639,26 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 			// and has a chance to register the abort listener.
 			await Promise.resolve();
 			controller.abort();
-			assert.equal(killCalls.length, 1, "abort fires kill exactly once");
+			assert.deepEqual(
+				closeCalls,
+				[42],
+				"abort fires closeContext exactly once with the run's id",
+			);
 			releaseSearch([]);
 			await handlerPromise;
 		} finally {
 			WebFetcher.prototype.search = orig.search;
 			WebFetcher.prototype.fetchAll = orig.fetchAll;
-			WebFetcher.prototype.kill = orig.kill;
+			WebFetcher.prototype.closeContext = orig.closeContext;
 		}
 	});
 
-	it("pre-aborted signal kills synchronously when handler enters network path", async () => {
+	it("pre-aborted signal closes the run's context synchronously on entry", async () => {
 		const handler = captureHandler();
 		const controller = new AbortController();
 		controller.abort();
 		const rummy = {
-			runId: 1,
+			runId: 7,
 			loopId: 1,
 			sequence: 5,
 			signal: controller.signal,
@@ -661,14 +673,12 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		const orig = {
 			search: WebFetcher.prototype.search,
 			fetchAll: WebFetcher.prototype.fetchAll,
-			kill: WebFetcher.prototype.kill,
+			closeContext: WebFetcher.prototype.closeContext,
 		};
-		const killCalls = [];
+		const closeCalls = [];
 		WebFetcher.prototype.search = async () => [];
 		WebFetcher.prototype.fetchAll = async () => [];
-		WebFetcher.prototype.kill = () => {
-			killCalls.push(1);
-		};
+		WebFetcher.prototype.closeContext = (id) => closeCalls.push(id);
 
 		try {
 			await handler(
@@ -678,9 +688,9 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		} finally {
 			WebFetcher.prototype.search = orig.search;
 			WebFetcher.prototype.fetchAll = orig.fetchAll;
-			WebFetcher.prototype.kill = orig.kill;
+			WebFetcher.prototype.closeContext = orig.closeContext;
 		}
-		assert.equal(killCalls.length, 1, "pre-aborted signal triggers one kill");
+		assert.deepEqual(closeCalls, [7]);
 	});
 
 	it("disarm removes the listener; aborting after success is a no-op", async () => {
@@ -702,14 +712,12 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		const orig = {
 			search: WebFetcher.prototype.search,
 			fetchAll: WebFetcher.prototype.fetchAll,
-			kill: WebFetcher.prototype.kill,
+			closeContext: WebFetcher.prototype.closeContext,
 		};
-		const killCalls = [];
+		const closeCalls = [];
 		WebFetcher.prototype.search = async () => [];
 		WebFetcher.prototype.fetchAll = async () => [];
-		WebFetcher.prototype.kill = () => {
-			killCalls.push(1);
-		};
+		WebFetcher.prototype.closeContext = (id) => closeCalls.push(id);
 
 		try {
 			await handler(
@@ -720,21 +728,21 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		} finally {
 			WebFetcher.prototype.search = orig.search;
 			WebFetcher.prototype.fetchAll = orig.fetchAll;
-			WebFetcher.prototype.kill = orig.kill;
+			WebFetcher.prototype.closeContext = orig.closeContext;
 		}
 		assert.equal(
-			killCalls.length,
+			closeCalls.length,
 			0,
-			"abort after handler completion does not fire kill",
+			"abort after handler completion does not fire closeContext",
 		);
 	});
 
-	it("<get>: aborting mid-fetch calls kill before fetch resolves", async () => {
+	it("<get>: aborting mid-fetch calls closeContext(runId) before fetch resolves", async () => {
 		const handlers = captureHandlers();
 		const handleGet = handlers.get;
 		const controller = new AbortController();
 		const rummy = {
-			runId: 1,
+			runId: 99,
 			loopId: 1,
 			sequence: 5,
 			signal: controller.signal,
@@ -748,17 +756,15 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		const WebFetcher = (await import("./WebFetcher.js")).default;
 		const orig = {
 			fetch: WebFetcher.prototype.fetch,
-			kill: WebFetcher.prototype.kill,
+			closeContext: WebFetcher.prototype.closeContext,
 		};
-		const killCalls = [];
+		const closeCalls = [];
 		let releaseFetch;
 		const fetchPromise = new Promise((r) => {
 			releaseFetch = r;
 		});
 		WebFetcher.prototype.fetch = () => fetchPromise;
-		WebFetcher.prototype.kill = () => {
-			killCalls.push(1);
-		};
+		WebFetcher.prototype.closeContext = (id) => closeCalls.push(id);
 
 		try {
 			const handlerPromise = handleGet(
@@ -767,7 +773,7 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 			);
 			await Promise.resolve();
 			controller.abort();
-			assert.equal(killCalls.length, 1);
+			assert.deepEqual(closeCalls, [99]);
 			releaseFetch({
 				url: "https://x.example/p",
 				title: "X",
@@ -776,7 +782,60 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 			await handlerPromise;
 		} finally {
 			WebFetcher.prototype.fetch = orig.fetch;
-			WebFetcher.prototype.kill = orig.kill;
+			WebFetcher.prototype.closeContext = orig.closeContext;
 		}
+	});
+});
+
+// Run-end cleanup: when act.completed/ask.completed fires, the plugin
+// must close the run's BrowserContext so the next run starts fresh
+// (no cross-run cookie / cache leak).
+describe("RummyWeb — run-end context cleanup", () => {
+	it("act.completed triggers closeContext for the completed run", async () => {
+		const handlers = captureHandlers();
+		// Force the fetcher to exist (it's lazy) so closeContext is reachable.
+		const handleGet = handlers.get;
+		const controller = new AbortController();
+		const rummy = {
+			runId: 200,
+			loopId: 1,
+			sequence: 5,
+			signal: controller.signal,
+			entries: { set: async () => {} },
+			getEntries: async () => [],
+			set: async () => {},
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const orig = {
+			fetch: WebFetcher.prototype.fetch,
+			closeContext: WebFetcher.prototype.closeContext,
+		};
+		const closeCalls = [];
+		WebFetcher.prototype.fetch = async () => ({
+			url: "https://x.example/p",
+			title: "X",
+			content: "body",
+		});
+		WebFetcher.prototype.closeContext = (id) => closeCalls.push(id);
+
+		try {
+			await handleGet({ attributes: { path: "https://x.example/p" } }, rummy);
+			handlers._fireCompleted("act", { runId: 200 });
+			assert.deepEqual(closeCalls, [200]);
+		} finally {
+			WebFetcher.prototype.fetch = orig.fetch;
+			WebFetcher.prototype.closeContext = orig.closeContext;
+		}
+	});
+
+	it("completed event without a runId throws (contract violation)", async () => {
+		const handlers = captureHandlers();
+		assert.throws(
+			() => handlers._fireCompleted("ask", { run: "alias-only" }),
+			/missing runId/,
+			"plugin treats a missing-runId completed event as a hook contract bug",
+		);
 	});
 });

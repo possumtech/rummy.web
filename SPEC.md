@@ -303,25 +303,33 @@ Client sends { method: "get", path: "https://example.com", run: "myrun" }
 
 ## WebFetcher Architecture
 
-### Persistent Browser Context
+### Browser and Per-Run Contexts
 
-Single browser instance with a persistent context shared across all fetches. Benefits: warm DNS cache, connection reuse, shared cookies. The browser shuts down after 15 minutes of inactivity via idle timer.
+A single chromium browser is shared across all runs in a fetcher; each run gets its own `BrowserContext` (cookies, localStorage, cache) so there's no cross-run bleed. Contexts are keyed on `rummy.runId` in `WebFetcher#contexts` (a `Map`). The browser stays warm until the 15-minute idle timer fires (`close()`); contexts are released earlier — either at run end (clean) or on abort.
+
+Local launches pass `--disable-gpu --disable-dev-shm-usage`, plus optionally `--no-sandbox` (`RUMMY_WEB_NO_SANDBOX=1`) and `--js-flags=--max-old-space-size=N` (`RUMMY_WEB_CHROMIUM_HEAP_MB=N`). Setting `RUMMY_WEB_PLAYWRIGHT_WS=ws://...` swaps the local launch for `chromium.connect()` against a remote chromium — multiple rummy processes can then share one browser process while still having per-run context isolation.
+
+### Run-End Context Cleanup
+
+The plugin constructor subscribes to `hooks.act.completed` and `hooks.ask.completed`. When either fires, the listener calls `WebFetcher#closeContext(runId)`. `runId` on the event payload is a hard contract — a missing runId throws (`"RummyWeb: completed event missing runId"`). This is the clean-shutdown path; it runs whether the run finished normally or was aborted.
 
 ### Shutdown via `rummy.signal`
 
-Both `#handleSearch` and `#handleGet` register a one-shot listener on `rummy.signal` that calls `WebFetcher#kill()` when the run is aborted. `kill()` nulls the cached browser/context refs and fires `browser.close({ reason })` without awaiting it. The CDP connection tears down synchronously, so every in-flight `page.goto` rejects with "Target … has been closed" within milliseconds — necessary because `page.goto` honors its own `timeout` opt, not the abort signal. Without this, an awaited graceful `close()` during shutdown would block on browser teardown that's itself blocked behind the in-flight goto, and the supervisor's outer kill deadline would expire before run artifacts finish writing. The chromium subprocess exits on its own timeline; that doesn't block the run.
+Both `#handleSearch` and `#handleGet` register a one-shot listener on `rummy.signal` (via `#armAbortClose`) that calls `WebFetcher#closeContext(rummy.runId)` when the run is aborted. Closing the context tears down the CDP connection for that context's pages — every in-flight `page.goto` in pages owned by it rejects with "Target … has been closed" within milliseconds. Necessary because `page.goto` honors its own `timeout` opt, not the abort signal: without this, an awaited graceful close during shutdown would block on browser teardown that's itself blocked behind the in-flight goto. The browser process is unaffected; other runs keep working.
 
-The listener is removed in a `try/finally` `disarm()` so it never outlives the handler. `rummy.signal` is a hard contract; if absent, the plugin crashes — fail-hard, no fallback.
-
-Note: Playwright 1.59 doesn't expose `Browser#process()` on the public API, so we can't SIGKILL the chromium subprocess directly even if we wanted to. CDP-teardown via `close()` is the correct primitive regardless.
+The abort listener is removed in a `try/finally` `disarm()` so it never outlives the handler. The run-end listener and the abort listener race; whichever fires first wins, the other becomes a no-op (`closeContext` is idempotent — an unknown runId returns silently). `rummy.signal` is a hard contract; if absent, destructuring it crashes — fail-hard, no fallback.
 
 ### `fetch(url, opts?)`
 
-Opens a tab in the persistent context, navigates, extracts content (HTML branch or non-HTML branch — see `#extract`), closes the tab. Options: `timeout` (default `FETCH_TIMEOUT`), `waitUntil` (default `"networkidle"`).
+Opens a tab in the run's `BrowserContext` (creating it if needed), navigates, extracts content (HTML branch or non-HTML branch — see `#extract`), closes the tab. Options: `runId` **(required)**, `timeout` (default `FETCH_TIMEOUT`), `waitUntil` (default `"networkidle"`). Throws `"WebFetcher: runId is required"` if `runId` is missing.
 
 ### `fetchAll(urls, opts?)`
 
-Opens concurrent tabs in the shared context. Returns `Promise.allSettled`. Each page logs fetch time and content size. Default timeout: 10s (`<search>` uses this to validate candidates and measure token cost; failures are dropped from the listing).
+Opens concurrent tabs in the run's `BrowserContext`. Returns `Promise.allSettled`. Each page logs fetch time and content size. Options: `runId` **(required)**, `timeout` (default 10s — `<search>` uses this to validate candidates and measure token cost; failures are dropped from the listing).
+
+### `closeContext(runId)`
+
+Removes the run's context from the map and fires `BrowserContext.close()` fire-and-forget. Idempotent: calling for an unknown runId returns silently. Called from `#armAbortClose` (on abort) and from the `act.completed` / `ask.completed` listener (on run end).
 
 ### `#extract(url, page, response)`
 
@@ -333,13 +341,13 @@ The non-HTML branch exists because Chromium doesn't execute scripts on non-HTML 
 
 ### Search Backends
 
-**SearXNG** (`RUMMY_SEARCH=searxng`):
+**SearXNG** (`RUMMY_WEB_SEARCH_BACKEND=searxng`):
 ```
 GET /search?q=...&format=json&language=en
 → { results: [{ title, url, content, engine }] }
 ```
 
-**Brave** (`RUMMY_SEARCH=brave`):
+**Brave** (`RUMMY_WEB_SEARCH_BACKEND=brave`):
 ```
 GET https://api.search.brave.com/res/v1/web/search?q=...&count=N
 Headers: X-Subscription-Token, Accept: application/json
@@ -369,7 +377,7 @@ All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x8
 
 | Scenario | Behavior |
 |---|---|
-| `RUMMY_SEARXNG_URL` not set | `search()` throws |
+| `RUMMY_WEB_SEARXNG_URL` not set | `search()` throws |
 | `BRAVE_API_KEY` not set | `search()` throws |
 | Search backend returns non-200 | `search()` throws with status |
 | Page returns 4xx/5xx | `fetch()` returns `{ error: "HTTP 404" }` |
@@ -377,7 +385,7 @@ All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x8
 | Readability parse fails | `fetch()` returns first 5000 chars of raw HTML |
 | Fetch error in handler | Warning logged, handler returns |
 | Per-turn search cap exceeded | Error logged via `hooks.error.log.emit()` with status 429 |
-| `rummy.signal` aborts mid-fetch | `WebFetcher#kill()` fire-and-forgets `browser.close()`; CDP teardown rejects in-flight `page.goto` within ms; handler's catch returns an error object |
+| `rummy.signal` aborts mid-fetch | Plugin calls `WebFetcher#closeContext(runId)` fire-and-forget; `BrowserContext.close()` rejects in-flight `page.goto` within ms; handler's catch returns an error object. Browser stays warm for other runs. |
 
 ## Design Decisions
 
@@ -401,9 +409,9 @@ Each search fetches and archives every cache-miss candidate and is therefore exp
 
 Fetched pages register as `data` category (alongside files and knowledge), not `logging`. They're persistent content the model carries and reasons about, not ephemeral operation records.
 
-### Persistent browser context
+### Per-run browser contexts on a shared chromium
 
-Single browser context shared across all fetches within a session. Warm DNS, connection reuse, and shared state. 15-minute idle timeout prevents resource leaks.
+Single chromium browser process; one `BrowserContext` per run, keyed on `rummy.runId`. Each run gets isolated cookies, localStorage, and cache — no cross-run bleed. The chromium subprocess (or remote CDP connection via `RUMMY_WEB_PLAYWRIGHT_WS`) stays warm across all runs. Contexts close at run end via the `act.completed` / `ask.completed` hook subscription; they also close on `rummy.signal` abort to collapse in-flight `page.goto` immediately. 15-minute idle timeout closes everything if no fetch activity.
 
 ### URL rewrites for known hostile hosts
 
@@ -415,18 +423,18 @@ Pixel 5 profile reduces page weight for sites serving responsive content.
 
 ### Configurable search backends
 
-SearXNG (self-hosted, private) and Brave Search API (hosted, API key) both normalize to the same result shape. Backend selection via `RUMMY_SEARCH` env var.
+SearXNG (self-hosted, private) and Brave Search API (hosted, API key) both normalize to the same result shape. Backend selection via `RUMMY_WEB_SEARCH_BACKEND` env var.
 
 ## Timeout Cascade
 
 ```
-RUMMY_FETCH_TIMEOUT
+RUMMY_WEB_FETCH_TIMEOUT
   ├ WebFetcher.fetch()     — page.goto({ timeout })
   ├ WebFetcher.search()    — fetch({ signal: AbortSignal.timeout() })
   └ WebFetcher.fetchAll()  — default 10000ms per page (overridable)
 ```
 
-`RUMMY_FETCH_TIMEOUT` is read from the environment with no hardcoded default — the server is expected to set it.
+`RUMMY_WEB_FETCH_TIMEOUT` is read from the environment with no hardcoded default — the server is expected to set it. Distinct from `RUMMY_FETCH_TIMEOUT` (rummy core's LLM-side fetch timeout) — these are two different ceilings.
 
 ## File Structure
 
