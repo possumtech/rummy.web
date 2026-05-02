@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import http from "node:http";
 import { after, before, describe, it } from "node:test";
 import WebFetcher from "./WebFetcher.js";
 
@@ -63,6 +64,49 @@ describe("WebFetcher", () => {
 			);
 			assert.strictEqual(result.error, "HTTP 404");
 			assert.strictEqual(result.content, null);
+		});
+	});
+
+	// kill() contract: an in-flight page.goto must reject within
+	// milliseconds of the call, not hang for the configured timeout. This
+	// is the only test that exercises real chromium — the plugin-level
+	// tests mock kill() itself.
+	describe("kill", () => {
+		let server;
+		let port;
+		let fetcher;
+
+		before(async () => {
+			// HTTP server that accepts connections but never responds —
+			// page.goto with waitUntil:"networkidle" will block until
+			// either timeout or kill().
+			server = http.createServer(() => {});
+			await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+			port = server.address().port;
+			fetcher = new WebFetcher();
+		});
+
+		after(async () => {
+			await fetcher.close();
+			await new Promise((resolve) => server.close(resolve));
+		});
+
+		it("force-aborts an in-flight page.goto", async () => {
+			const start = Date.now();
+			const fetchPromise = fetcher.fetch(`http://127.0.0.1:${port}/hang`, {
+				timeout: 60000,
+			});
+			setTimeout(() => fetcher.kill(), 200);
+			const result = await fetchPromise;
+			const elapsed = Date.now() - start;
+			assert.ok(
+				result.error,
+				`expected error from killed goto, got: ${JSON.stringify(result)}`,
+			);
+			assert.ok(
+				elapsed < 5000,
+				`fetch should reject quickly after kill, took ${elapsed}ms (the 60000ms goto timeout would mean kill did nothing)`,
+			);
 		});
 	});
 });

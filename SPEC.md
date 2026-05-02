@@ -309,7 +309,11 @@ Single browser instance with a persistent context shared across all fetches. Ben
 
 ### Shutdown via `rummy.signal`
 
-Both `#handleSearch` and `#handleGet` register a one-shot listener on `rummy.signal` that calls `WebFetcher#kill()` when the run is aborted. `kill()` SIGKILLs chromium's subprocess synchronously, which collapses every in-flight `page.goto` immediately — necessary because `page.goto` honors its own `timeout` opt, not the abort signal. Without this, a graceful `close()` during shutdown would await a browser teardown blocked behind the in-flight goto, and the supervisor's outer kill deadline would expire before run artifacts finish writing. The listener is removed in a `try/finally` `disarm()` so it never outlives the handler. `rummy.signal` is a hard contract; if absent, the plugin crashes — fail-hard, no fallback.
+Both `#handleSearch` and `#handleGet` register a one-shot listener on `rummy.signal` that calls `WebFetcher#kill()` when the run is aborted. `kill()` nulls the cached browser/context refs and fires `browser.close({ reason })` without awaiting it. The CDP connection tears down synchronously, so every in-flight `page.goto` rejects with "Target … has been closed" within milliseconds — necessary because `page.goto` honors its own `timeout` opt, not the abort signal. Without this, an awaited graceful `close()` during shutdown would block on browser teardown that's itself blocked behind the in-flight goto, and the supervisor's outer kill deadline would expire before run artifacts finish writing. The chromium subprocess exits on its own timeline; that doesn't block the run.
+
+The listener is removed in a `try/finally` `disarm()` so it never outlives the handler. `rummy.signal` is a hard contract; if absent, the plugin crashes — fail-hard, no fallback.
+
+Note: Playwright 1.59 doesn't expose `Browser#process()` on the public API, so we can't SIGKILL the chromium subprocess directly even if we wanted to. CDP-teardown via `close()` is the correct primitive regardless.
 
 ### `fetch(url, opts?)`
 
@@ -373,7 +377,7 @@ All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x8
 | Readability parse fails | `fetch()` returns first 5000 chars of raw HTML |
 | Fetch error in handler | Warning logged, handler returns |
 | Per-turn search cap exceeded | Error logged via `hooks.error.log.emit()` with status 429 |
-| `rummy.signal` aborts mid-fetch | `WebFetcher#kill()` SIGKILLs chromium; in-flight `page.goto` rejects; handler's catch returns an error object |
+| `rummy.signal` aborts mid-fetch | `WebFetcher#kill()` fire-and-forgets `browser.close()`; CDP teardown rejects in-flight `page.goto` within ms; handler's catch returns an error object |
 
 ## Design Decisions
 

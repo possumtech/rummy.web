@@ -321,28 +321,32 @@ export default class WebFetcher {
 		this.#launching = null;
 	}
 
-	// Synchronous force-kill. `page.goto` honors its own `timeout` opt, not
-	// the run's AbortSignal, so a graceful close() during shutdown awaits a
-	// browser teardown blocked behind an in-flight goto — the supervisor's
-	// outer kill deadline expires before run artifacts finish writing.
-	// SIGKILLing chromium collapses every in-flight goto immediately; the
-	// handlers' catch blocks return error objects and shutdown proceeds.
+	// Force-cancel for shutdown. `page.goto` honors its own `timeout`
+	// opt, not the run's AbortSignal — a graceful awaited close() during
+	// shutdown waits on browser teardown blocked behind in-flight gotos
+	// and the supervisor's kill deadline expires before run artifacts
+	// finish writing. Playwright doesn't expose the chromium subprocess
+	// handle (1.59), so we can't SIGKILL directly. Calling close()
+	// fire-and-forget tears down the CDP connection: every in-flight
+	// goto rejects with "Target page, context or browser has been closed"
+	// almost immediately, the handlers' catch blocks return error objects,
+	// and shutdown proceeds. The browser process cleanup happens on its
+	// own timeline and doesn't block the run.
 	kill() {
 		if (this.#idleTimer) {
 			clearTimeout(this.#idleTimer);
 			this.#idleTimer = null;
 		}
-		const proc = this.#browser?.process();
-		if (proc) {
-			try {
-				proc.kill("SIGKILL");
-			} catch {
-				// Process already exited (ESRCH) — the only realistic failure
-				// mode for SIGKILL on a tracked subprocess.
-			}
-		}
+		const browser = this.#browser;
 		this.#browser = null;
 		this.#context = null;
 		this.#launching = null;
+		if (browser) {
+			// Fire-and-forget: the contract is that in-flight gotos reject
+			// promptly (CDP teardown does that synchronously); the close()
+			// promise itself races process exit and we don't care about
+			// its outcome.
+			browser.close({ reason: "rummy run aborted" }).catch(() => {});
+		}
 	}
 }

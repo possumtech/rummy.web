@@ -618,7 +618,7 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		});
 		WebFetcher.prototype.search = () => searchPromise;
 		WebFetcher.prototype.fetchAll = async () => [];
-		WebFetcher.prototype.kill = function () {
+		WebFetcher.prototype.kill = () => {
 			killCalls.push(Date.now());
 		};
 
@@ -666,7 +666,7 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		const killCalls = [];
 		WebFetcher.prototype.search = async () => [];
 		WebFetcher.prototype.fetchAll = async () => [];
-		WebFetcher.prototype.kill = function () {
+		WebFetcher.prototype.kill = () => {
 			killCalls.push(1);
 		};
 
@@ -707,7 +707,7 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 		const killCalls = [];
 		WebFetcher.prototype.search = async () => [];
 		WebFetcher.prototype.fetchAll = async () => [];
-		WebFetcher.prototype.kill = function () {
+		WebFetcher.prototype.kill = () => {
 			killCalls.push(1);
 		};
 
@@ -756,7 +756,7 @@ describe("RummyWeb — abort signal hard-kills chromium", () => {
 			releaseFetch = r;
 		});
 		WebFetcher.prototype.fetch = () => fetchPromise;
-		WebFetcher.prototype.kill = function () {
+		WebFetcher.prototype.kill = () => {
 			killCalls.push(1);
 		};
 
