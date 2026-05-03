@@ -1,7 +1,8 @@
 import WebFetcher from "./WebFetcher.js";
 
-const MAX_SEARCHES_PER_TURN = Number(process.env.RUMMY_WEB_SEARCH_MAX) || 1;
-const TOKEN_DIVISOR = Number(process.env.RUMMY_TOKEN_DIVISOR) || 4;
+const MAX_SEARCHES_PER_TURN = Number(process.env.RUMMY_WEB_SEARCH_MAX);
+const SEARCH_RESULTS_DEFAULT = Number(process.env.RUMMY_WEB_SEARCH_RESULTS);
+const TOKEN_DIVISOR = Number(process.env.RUMMY_TOKEN_DIVISOR);
 // Per-URL cache TTL. An http/https entry whose attributes.fetched_at is
 // younger than this is served from the existing archived body — same
 // rule for both <get> and search-result paths.
@@ -23,11 +24,11 @@ function isFresh(entry, now = Date.now()) {
 
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web (ONE per turn)
 Example: <search>node.js streams backpressure</search>
-Example: <search results="5">SQLite WAL mode</search> (limit results)
-* Results listed in the search's log entry as a markdown bullet list — \`* URL — title (N tokens)\` per candidate, with an indented snippet line beneath. Token count is the page's real cost if you <get> it; use it to pick.
+Example: <search results="5">SQLite WAL mode</search> (narrow the result count)
+* Results listed in the search's log entry as a markdown bullet list. Each result shows: \`* URL — title (N tokens)\` followed by indented metadata (publisher · date · language · type) and one or more query-relevant snippets. Token count is the page's real cost if you <get> it; use it to pick.
 * Unreachable URLs are dropped; the header reports \`N of M results (M-N unreachable)\` when any were filtered.
 * Use <get path="https://example.com/page"/> on a result URL to promote it into context (already fetched during search; <get> is a pure promote, no second round trip).
-* **ONE \`<search>\` per turn.** Each call returns 5–12 candidate URLs. Additional searches the same turn are refused.`;
+* **ONE \`<search>\` per turn.** Additional searches the same turn are refused.`;
 
 export default class RummyWeb {
 	#core;
@@ -130,7 +131,7 @@ export default class RummyWeb {
 			return;
 		}
 
-		const limit = attrs.results || 12;
+		const limit = attrs.results || SEARCH_RESULTS_DEFAULT;
 		const fetcher = this.#getFetcher();
 		const disarm = this.#armAbortClose(rummy, fetcher);
 		try {
@@ -193,8 +194,8 @@ export default class RummyWeb {
 				valid.push({
 					url,
 					title: eAttrs.title || r.title,
-					snippet: r.snippet,
 					tokens: e.tokens ?? countTokens(e.body),
+					brave: r,
 				});
 				continue;
 			}
@@ -202,13 +203,26 @@ export default class RummyWeb {
 			const fetched = page?.status === "fulfilled" ? page.value : null;
 			if (!fetched || fetched.error) continue;
 			const titleHeader = fetched.title ? `# ${fetched.title}\n\n` : "";
+			// Brave-first metadata, with Readability fields preserved as
+			// fallbacks for the direct-<get> path (and for cases where Brave
+			// didn't emit a given field on this result).
 			await rummy.set({
 				path: url,
 				body: titleHeader + (fetched.content || ""),
 				state: "resolved",
 				visibility: "archived",
 				attributes: {
-					title: fetched.title,
+					title: r.title || fetched.title,
+					description: r.description || null,
+					extra_snippets: r.extra_snippets || [],
+					page_age: r.page_age,
+					age: r.age,
+					language: r.language,
+					content_type: r.content_type,
+					subtype: r.subtype,
+					profile: r.profile,
+					meta_url: r.meta_url,
+					keywords: r.keywords,
 					excerpt: fetched.excerpt,
 					byline: fetched.byline,
 					siteName: fetched.siteName,
@@ -217,9 +231,9 @@ export default class RummyWeb {
 			});
 			valid.push({
 				url,
-				title: fetched.title || r.title,
-				snippet: r.snippet,
+				title: r.title || fetched.title,
 				tokens: countTokens(fetched.content),
+				brave: r,
 			});
 		}
 
@@ -229,14 +243,10 @@ export default class RummyWeb {
 				: `${valid.length} of ${results.length} results for "${query}" (${results.length - valid.length} unreachable)`;
 		// Markdown bullet list, NOT XML or tool-shape: leading `*` is the
 		// load-bearing signal that this body is rendered output, not
-		// anything the model would type as a query. The same URL/title/
-		// tokens metadata as before, behind a marker the model has zero
-		// training-prior for emitting as a tool.
+		// anything the model would type as a query.
 		const lines = [header];
-		for (const r of valid) {
-			const head = r.title ? `${r.url} — ${r.title}` : r.url;
-			lines.push(`* ${head} (${r.tokens} tokens)`);
-			if (r.snippet) lines.push(`  ${r.snippet}`);
+		for (const v of valid) {
+			lines.push(...renderResult(v));
 		}
 
 		await rummy.set({
@@ -290,12 +300,24 @@ export default class RummyWeb {
 		}
 
 		const header = fetched.title ? `# ${fetched.title}\n\n` : "";
+		// Preserve any existing Brave-side attributes (description,
+		// extra_snippets, page_age, profile, …) when refreshing a stale
+		// entry. Brave metadata isn't available on the direct-<get> path,
+		// so overwriting attributes wholesale would silently downgrade an
+		// entry that was originally archived via <search>.
+		const existingAttrs =
+			existing.length > 0
+				? typeof existing[0].attributes === "string"
+					? JSON.parse(existing[0].attributes)
+					: existing[0].attributes || {}
+				: {};
 		await rummy.set({
 			path: clean,
 			body: header + (fetched.content || ""),
 			state: "resolved",
 			attributes: {
-				title: fetched.title,
+				...existingAttrs,
+				title: fetched.title || existingAttrs.title,
 				excerpt: fetched.excerpt,
 				byline: fetched.byline,
 				siteName: fetched.siteName,
@@ -304,14 +326,21 @@ export default class RummyWeb {
 		});
 	}
 
+	// Brave-first with Readability fallback. Both source families populate
+	// the same view; whichever fields are present win in priority order.
 	#summaryUrl(entry) {
-		const { title, excerpt, snippet, byline, siteName } =
-			entry.attributes || {};
+		const attrs = parseAttrs(entry);
 		const lines = [];
-		if (title) lines.push(`## ${title}`);
-		if (siteName || byline)
-			lines.push([siteName, byline].filter(Boolean).join(" — "));
-		if (excerpt || snippet) lines.push(excerpt || snippet);
+		if (attrs.title) lines.push(`## ${attrs.title}`);
+		const meta = metadataLine(attrs);
+		if (meta) lines.push(meta);
+		const desc = attrs.description || attrs.excerpt || attrs.snippet;
+		if (desc) lines.push(desc);
+		if (Array.isArray(attrs.extra_snippets)) {
+			for (const s of attrs.extra_snippets) {
+				if (s) lines.push(`* ${s}`);
+			}
+		}
 		return lines.join("\n");
 	}
 
@@ -330,4 +359,43 @@ function parseAttrs(entry) {
 	return typeof entry.attributes === "string"
 		? JSON.parse(entry.attributes)
 		: entry.attributes;
+}
+
+// One-line metadata: "Publisher · 2014-08-12 · en · article". Reads
+// Brave's profile/page_age/language/subtype first, falls back to
+// Readability's siteName/byline. Empty pieces drop; if nothing remains
+// the caller skips emitting the line at all.
+function metadataLine(attrs) {
+	const parts = [];
+	const publisher =
+		attrs.profile?.long_name ||
+		attrs.profile?.name ||
+		attrs.siteName ||
+		attrs.byline;
+	if (publisher) parts.push(publisher);
+	const date = attrs.page_age ? attrs.page_age.slice(0, 10) : attrs.age;
+	if (date) parts.push(date);
+	if (attrs.language) parts.push(attrs.language);
+	const kind = attrs.subtype || attrs.content_type;
+	if (kind) parts.push(kind);
+	return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+// Per-result block in the search log. Caps extra_snippets at 2 to keep
+// the menu dense — the rest live in attributes for the post-demotion
+// summarized view, where the model has already chosen and is curating
+// context.
+function renderResult({ url, title, tokens, brave }) {
+	const head = title ? `${url} — ${title}` : url;
+	const lines = [`* ${head} (${tokens} tokens)`];
+	const meta = metadataLine(brave);
+	if (meta) lines.push(`  ${meta}`);
+	if (brave?.description) lines.push(`  ${brave.description}`);
+	const snippets = Array.isArray(brave?.extra_snippets)
+		? brave.extra_snippets.slice(0, 2)
+		: [];
+	for (const s of snippets) {
+		if (s) lines.push(`    · ${s}`);
+	}
+	return lines;
 }

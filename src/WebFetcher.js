@@ -68,7 +68,7 @@ const PLAYWRIGHT_WS = process.env.RUMMY_WEB_PLAYWRIGHT_WS;
 const NO_SANDBOX = process.env.RUMMY_WEB_NO_SANDBOX === "1";
 // Cap chromium's V8 old-space heap (MB). Useful on memory-constrained
 // hosts where chromium's default would crowd out other workloads.
-const CHROMIUM_HEAP_MB = Number(process.env.RUMMY_WEB_CHROMIUM_HEAP_MB) || null;
+const CHROMIUM_HEAP_MB = Number(process.env.RUMMY_WEB_CHROMIUM_HEAP_MB);
 
 // https://en.wikipedia.org/wiki/Foo → mobile-html API for clean content
 const WIKI_PATTERN = /^(https?:\/\/[a-z]+\.wikipedia\.org)\/wiki\/(.+)$/;
@@ -296,8 +296,15 @@ export default class WebFetcher {
 	}
 
 	/**
-	 * Search the web. Dispatches to the configured backend.
-	 * Returns [{ title, url, snippet, engine }].
+	 * Search the web. Dispatches to the configured backend. Both backends
+	 * return the same shape; Brave-only fields are null when unavailable
+	 * (e.g. SearXNG path, or per-result when Brave didn't supply them).
+	 *
+	 * Returns [{
+	 *   url, title, description, extra_snippets,
+	 *   page_age, age, language, content_type, subtype,
+	 *   profile, meta_url, keywords, engine
+	 * }].
 	 */
 	async search(query, { limit = 12, language = "en" } = {}) {
 		if (SEARCH_BACKEND === "brave") return this.#searchBrave(query, { limit });
@@ -321,9 +328,18 @@ export default class WebFetcher {
 		}
 		const data = await response.json();
 		return (data.results || []).slice(0, limit).map((r) => ({
-			title: r.title,
 			url: r.url,
-			snippet: r.content || "",
+			title: r.title,
+			description: r.content || "",
+			extra_snippets: [],
+			page_age: null,
+			age: null,
+			language: null,
+			content_type: null,
+			subtype: null,
+			profile: null,
+			meta_url: null,
+			keywords: null,
 			engine: r.engine,
 		}));
 	}
@@ -334,6 +350,7 @@ export default class WebFetcher {
 		const url = new URL("https://api.search.brave.com/res/v1/web/search");
 		url.searchParams.set("q", query);
 		url.searchParams.set("count", String(Math.min(limit, 20)));
+		url.searchParams.set("extra_snippets", "true");
 
 		const response = await fetch(url, {
 			headers: {
@@ -348,9 +365,18 @@ export default class WebFetcher {
 		}
 		const data = await response.json();
 		return (data.web?.results || []).slice(0, limit).map((r) => ({
-			title: r.title,
 			url: r.url,
-			snippet: r.description || "",
+			title: r.title,
+			description: r.description || "",
+			extra_snippets: Array.isArray(r.extra_snippets) ? r.extra_snippets : [],
+			page_age: r.page_age || null,
+			age: r.age || null,
+			language: r.language || null,
+			content_type: r.content_type || null,
+			subtype: r.subtype || null,
+			profile: r.profile || null,
+			meta_url: r.meta_url || null,
+			keywords: normalizeKeywords(r.schemas),
 			engine: "brave",
 		}));
 	}
@@ -375,4 +401,38 @@ export default class WebFetcher {
 		}
 		this.#launching = null;
 	}
+}
+
+// schema.org `keywords` ships in three documented shapes (string with
+// commas, array of strings, absent) and Brave returns the parent
+// `schemas` field as either an object or an array of objects depending
+// on what the page emits. Walk the structure, collect any string value
+// reached via a `keywords` key, casefold + trim + dedup. Exported only
+// for testability.
+export function normalizeKeywords(schemas) {
+	if (!schemas) return null;
+	const collected = new Set();
+	const visit = (node) => {
+		if (!node) return;
+		if (Array.isArray(node)) {
+			for (const item of node) visit(item);
+			return;
+		}
+		if (typeof node !== "object") return;
+		const kw = node.keywords;
+		if (typeof kw === "string") {
+			for (const tag of kw.split(",")) {
+				const t = tag.trim().toLowerCase();
+				if (t) collected.add(t);
+			}
+		} else if (Array.isArray(kw)) {
+			for (const tag of kw) {
+				if (typeof tag !== "string") continue;
+				const t = tag.trim().toLowerCase();
+				if (t) collected.add(t);
+			}
+		}
+	};
+	visit(schemas);
+	return collected.size > 0 ? [...collected] : null;
 }

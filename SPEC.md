@@ -153,21 +153,33 @@ Web-relevant schemes registered by this plugin:
 
 ### Entry Attributes
 
-`https://` entries are created by both `<search>` (archived per candidate) and `<get>` (visible on demand). The attribute set is:
+`https://` entries are created by both `<search>` (archived per candidate, with full Brave metadata) and `<get>` (visible on demand, Readability-only). The attribute set:
 
 ```json
 {
     "title": "Page Title",
-    "excerpt": "Short description",
+    "description": "Brave's editorial description",
+    "extra_snippets": ["query-relevant snippet", "another"],
+    "page_age": "2024-08-12T10:00:00",
+    "age": "1 month ago",
+    "language": "en",
+    "content_type": "article",
+    "subtype": "article",
+    "profile": { "long_name": "Example Publisher", "name": "example.com" },
+    "meta_url": { "scheme": "https", "netloc": "example.com" },
+    "keywords": ["alpha", "beta"],
+    "excerpt": "Readability's first-paragraph excerpt",
     "byline": "Author Name",
     "siteName": "example.com",
     "fetched_at": 1735689600000
 }
 ```
 
+The Brave-side fields (`description` through `keywords`) populate when search archived the entry; they're `null`/`[]` on direct-`<get>` entries. Readability-side fields (`excerpt`, `byline`, `siteName`) populate from extraction. On stale-refresh via `<get>`, the new Readability fields override their counterparts and Brave-side fields are preserved as-is via attribute spread.
+
 `fetched_at` is `Date.now()` at write time. It's the freshness signal for the 10-minute cache check applied by both `<search>` (skip refetch of fresh candidates) and `<get>` (skip refetch of fresh existing entries).
 
-The search log entry (`log://turn_N/search/{slug}`) carries `{ query }` as its attributes; the body is the (URL, title, snippet) candidate listing.
+The search log entry (`log://turn_N/search/{slug}`) carries `{ query }` as its attributes. Body is a markdown bullet list — per-result block as `* URL — title (N tokens)` with optional indented `Publisher · date · lang · type` metadata, description, and up to 2 bulleted extra snippets.
 
 ## RummyWeb Registration
 
@@ -209,8 +221,8 @@ All registration is cross-scheme (`core.name` is `"web"`, but it registers on `s
 5. Partition candidates against the cache: for each cleaned URL, look up an existing entry. If one exists and `attributes.fetched_at` is younger than `CACHE_TTL_MS` (10 min), reuse it; otherwise queue for fetch.
 6. Fetch the queued (stale or new) URLs in parallel via `fetcher.fetchAll(urls, { timeout: 10000 })` to validate reachability, measure token cost, and capture the body. If everything was cached, the network call is skipped entirely.
 7. Drop any freshly-fetched result whose fetch failed (network error) or whose content extraction errored (404, timeout, etc.).
-8. For each fresh survivor, archive the body as an `<https>` entry: `path: cleanUrl`, `state: "resolved"`, `visibility: "archived"`, body `# {title}\n\n{content}`, attributes `{title, excerpt, byline, siteName, fetched_at}`. Cached survivors are reused as-is — no rewrite.
-9. Build the result listing as a markdown bullet list — `* URL — title (N tokens)` per survivor with an indented snippet line. Header reports `valid/total` count when any were dropped. The `*` prefix is load-bearing — it makes the body unambiguously rendered output, not something the model would emit as a tool.
+8. For each fresh survivor, archive the body as an `<https>` entry: `path: cleanUrl`, `state: "resolved"`, `visibility: "archived"`, body `# {title}\n\n{content}`, attributes carry the full Brave-side set (`description`, `extra_snippets`, `page_age`, `age`, `language`, `content_type`, `subtype`, `profile`, `meta_url`, `keywords`) plus the Readability-side set (`excerpt`, `byline`, `siteName`) plus `title` and `fetched_at`. Cached survivors are reused as-is — no rewrite.
+9. Build the result listing as a markdown bullet list. Each result: `* URL — title (N tokens)`; then an indented `Publisher · date · lang · type` line if any of those are populated; then the description if present; then up to 2 bulleted extra snippets. The remaining extra_snippets stay in attributes for the summarized view. Header reports `valid/total` count when any were dropped. The `*` prefix is load-bearing — it makes the body unambiguously rendered output, not something the model would emit as a tool.
 10. Store the listing at `entry.resultPath` with state `"resolved"` and `{ query }` attributes.
 
 A subsequent `<get>` on any listed URL hits the existing-entry short-circuit in the get handler and is promoted to `visible` without a second round trip.
@@ -230,12 +242,16 @@ Priority 5 runs before the core get handler at priority 10.
 
 **Visible** (`http`/`https`): pass-through `entry.body` — the full markdown content.
 
-**Summarized** (`http`/`https`): compact card from attributes:
+**Summarized** (`http`/`https`): compact card from attributes. Brave-first with Readability fallback:
 ```
 ## Page Title
-siteName — Author
-Excerpt or search snippet
+Publisher · 2024-08-12 · en · article
+Description (or excerpt fallback)
+* extra snippet 1
+* extra snippet 2
+* …
 ```
+Publisher reads `profile.long_name || profile.name || siteName || byline`. The metadata line is omitted entirely if every field resolves empty. All `extra_snippets` are rendered here (the listing capped at 2; the rest live in attributes for this view).
 
 **Visible** (`search`): `# search "query"\n{url listing}`
 
@@ -286,7 +302,7 @@ Model emits <search>query</search>
     → Partitions candidates: fresh archives (fetched_at < 10 min) reused as-is; stale/new go to fetchAll()
     → Fetches the stale/new subset in parallel to validate + measure tokens
     → Archives each fresh survivor as an <https> entry (visibility: "archived", fetched_at stamped); drops unreachable
-    → Stores (* URL — title (N tokens) / snippet) bullet listing at entry.resultPath
+    → Stores (* URL — title (N tokens) + metadata + description + ≤2 extras) bullet listing at entry.resultPath
   → hooks.entry.created.emit(entry)
 ```
 
@@ -354,7 +370,7 @@ Headers: X-Subscription-Token, Accept: application/json
 → { web: { results: [{ title, url, description }] } }
 ```
 
-Both normalize to `[{ title, url, snippet, engine }]`.
+Both normalize to `[{ url, title, description, extra_snippets, page_age, age, language, content_type, subtype, profile, meta_url, keywords, engine }]`. SearXNG-only callers leave the Brave-specific fields as `null` / `[]`. `keywords` is derived from Brave's `schemas` field via `normalizeKeywords()`, which walks the schema.org JSON-LD recursively and handles all three documented `keywords` shapes (CSV string, array of strings, absent), casefolding/trimming/deduping.
 
 ### URL Normalization
 

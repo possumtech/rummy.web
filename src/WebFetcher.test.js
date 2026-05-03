@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import http from "node:http";
 import { after, before, describe, it } from "node:test";
-import WebFetcher from "./WebFetcher.js";
+import WebFetcher, { normalizeKeywords } from "./WebFetcher.js";
 
 describe("WebFetcher", () => {
 	describe("cleanUrl", () => {
@@ -140,6 +140,46 @@ describe("WebFetcher", () => {
 			// b should still be in flight; force-close it to clean up
 			fetcher.closeContext(runB);
 			await bPromise;
+		});
+	});
+
+	// schema.org `keywords` reaches us through Brave's `schemas` field
+	// in three documented shapes plus structural variation (object vs.
+	// array). The walker has to flatten, casefold, trim, and dedup.
+	describe("normalizeKeywords", () => {
+		it("splits CSV string on commas, lowercases, trims, dedupes", () => {
+			const out = normalizeKeywords({
+				keywords: "Alpha, BETA ,  alpha , gamma",
+			});
+			assert.deepEqual(out, ["alpha", "beta", "gamma"]);
+		});
+
+		it("normalizes array-of-strings shape", () => {
+			const out = normalizeKeywords({ keywords: ["X", "Y", "x"] });
+			assert.deepEqual(out, ["x", "y"]);
+		});
+
+		it("returns null when no keywords reachable", () => {
+			assert.strictEqual(normalizeKeywords(null), null);
+			assert.strictEqual(normalizeKeywords(undefined), null);
+			assert.strictEqual(normalizeKeywords({ name: "Article" }), null);
+			assert.strictEqual(normalizeKeywords({ keywords: "" }), null);
+		});
+
+		it("walks an array of schema objects and merges all keywords", () => {
+			const out = normalizeKeywords([
+				{ "@type": "Article", keywords: "node, streams" },
+				{ "@type": "BreadcrumbList" },
+				{ "@type": "WebPage", keywords: ["Backpressure", "node"] },
+			]);
+			assert.deepEqual(out.toSorted(), ["backpressure", "node", "streams"]);
+		});
+
+		it("ignores non-string entries inside a keywords array", () => {
+			const out = normalizeKeywords({
+				keywords: ["valid", 42, null, { nested: "ignored" }, "ok"],
+			});
+			assert.deepEqual(out, ["valid", "ok"]);
 		});
 	});
 });

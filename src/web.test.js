@@ -147,13 +147,13 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 					url: "https://a.example/page",
 					engine: "brave",
 					title: "Page A",
-					snippet: "snippet A",
+					description: "description A",
 				},
 				{
 					url: "https://b.example/page",
 					engine: "brave",
 					title: "Page B",
-					snippet: "snippet B",
+					description: "description B",
 				},
 			];
 			WebFetcher.prototype.fetchAll = async () => [
@@ -219,7 +219,10 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 				"first result prefixed with markdown bullet (* URL …)",
 			);
 			assert.ok(logWrite.body.includes("Page A"), "title listed");
-			assert.ok(logWrite.body.includes("snippet A"), "snippet listed");
+			assert.ok(
+				logWrite.body.includes("description A"),
+				"Brave description listed",
+			);
 			assert.ok(
 				logWrite.body.includes("* https://b.example/page"),
 				"second result prefixed with markdown bullet",
@@ -253,9 +256,9 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			const origSearch = WebFetcher.prototype.search;
 			const origFetchAll = WebFetcher.prototype.fetchAll;
 			WebFetcher.prototype.search = async () => [
-				{ url: "https://ok.example/page", title: "OK", snippet: "" },
-				{ url: "https://gone.example/404", title: "Gone", snippet: "" },
-				{ url: "https://timeout.example/page", title: "Slow", snippet: "" },
+				{ url: "https://ok.example/page", title: "OK", description: "" },
+				{ url: "https://gone.example/404", title: "Gone", description: "" },
+				{ url: "https://timeout.example/page", title: "Slow", description: "" },
 			];
 			WebFetcher.prototype.fetchAll = async () => [
 				{
@@ -836,6 +839,247 @@ describe("RummyWeb — run-end context cleanup", () => {
 			() => handlers._fireCompleted("ask", { run: "alias-only" }),
 			/missing runId/,
 			"plugin treats a missing-runId completed event as a hook contract bug",
+		);
+	});
+});
+
+// Rich Brave metadata flows from `search` results through both the
+// search-log listing and the per-URL archive attributes.
+describe("RummyWeb — Brave-rich rendering and refresh", () => {
+	it("search log entry renders metadata line, description, and capped extra_snippets", async () => {
+		const handler = captureHandler();
+		const setCalls = [];
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			signal: new AbortController().signal,
+			entries: { set: async () => {} },
+			getEntries: async () => [],
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origSearch = WebFetcher.prototype.search;
+		const origFetchAll = WebFetcher.prototype.fetchAll;
+		WebFetcher.prototype.search = async () => [
+			{
+				url: "https://a.example/page",
+				title: "Page A",
+				description: "Description A.",
+				extra_snippets: ["snippet-1", "snippet-2", "snippet-3", "snippet-4"],
+				page_age: "2024-08-12T10:00:00",
+				language: "en",
+				subtype: "article",
+				profile: { long_name: "Example Publisher" },
+				keywords: ["alpha", "beta"],
+				engine: "brave",
+			},
+		];
+		WebFetcher.prototype.fetchAll = async () => [
+			{
+				status: "fulfilled",
+				value: {
+					title: "Readability Title",
+					content: "x".repeat(400),
+					excerpt: null,
+					byline: null,
+					siteName: null,
+				},
+			},
+		];
+
+		try {
+			await handler(
+				{ attributes: { path: "q" }, resultPath: "log://turn_5/search/q" },
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.search = origSearch;
+			WebFetcher.prototype.fetchAll = origFetchAll;
+		}
+
+		const log = setCalls.find((c) => c.path === "log://turn_5/search/q");
+		assert.ok(log, "search wrote its log entry");
+		assert.match(
+			log.body,
+			/Example Publisher · 2024-08-12 · en · article/,
+			"metadata line shows publisher · date · lang · type",
+		);
+		assert.ok(
+			log.body.includes("Description A."),
+			"Brave description listed",
+		);
+		assert.ok(
+			log.body.includes("· snippet-1") && log.body.includes("· snippet-2"),
+			"first two extra_snippets rendered",
+		);
+		assert.ok(
+			!log.body.includes("snippet-3") && !log.body.includes("snippet-4"),
+			"extra_snippets capped at 2 in the listing",
+		);
+		assert.ok(
+			log.body.includes("Page A"),
+			"Brave title wins over Readability title",
+		);
+
+		const archived = setCalls.find(
+			(c) => c.path === "https://a.example/page",
+		);
+		assert.ok(archived, "result archived under its URL");
+		assert.equal(archived.attributes.title, "Page A");
+		assert.equal(archived.attributes.description, "Description A.");
+		assert.deepEqual(archived.attributes.keywords, ["alpha", "beta"]);
+		assert.equal(archived.attributes.extra_snippets.length, 4);
+		assert.equal(archived.attributes.profile.long_name, "Example Publisher");
+	});
+
+	it("<get> stale-refresh preserves Brave attributes the new fetch can't know", async () => {
+		const handlers = captureHandlers();
+		const handleGet = handlers.get;
+		const setCalls = [];
+		const stale = {
+			path: "https://a.example/page",
+			body: "old body",
+			attributes: {
+				title: "Old Title",
+				description: "Brave description",
+				extra_snippets: ["e1", "e2"],
+				profile: { long_name: "Example Publisher" },
+				keywords: ["alpha"],
+				language: "en",
+				subtype: "article",
+				excerpt: "old excerpt",
+				fetched_at: Date.now() - 11 * 60_000,
+			},
+			tokens: 10,
+		};
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			signal: new AbortController().signal,
+			entries: { set: async () => {} },
+			getEntries: async (path) =>
+				path === "https://a.example/page" ? [stale] : [],
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origFetch = WebFetcher.prototype.fetch;
+		WebFetcher.prototype.fetch = async () => ({
+			url: "https://a.example/page",
+			title: "Refreshed Title",
+			content: "refreshed body",
+			excerpt: "fresh excerpt",
+			byline: null,
+			siteName: "example.com",
+		});
+
+		try {
+			await handleGet(
+				{ attributes: { path: "https://a.example/page" } },
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.fetch = origFetch;
+		}
+
+		assert.equal(setCalls.length, 1, "stale entry refreshed once");
+		const refreshed = setCalls[0];
+		assert.ok(
+			refreshed.body.includes("refreshed body"),
+			"body comes from the new fetch",
+		);
+		assert.equal(refreshed.attributes.title, "Refreshed Title");
+		assert.equal(refreshed.attributes.excerpt, "fresh excerpt");
+		// Brave fields the refresh fetch had no way to know — must persist.
+		assert.equal(
+			refreshed.attributes.description,
+			"Brave description",
+			"Brave description preserved across refresh",
+		);
+		assert.deepEqual(refreshed.attributes.extra_snippets, ["e1", "e2"]);
+		assert.equal(refreshed.attributes.profile.long_name, "Example Publisher");
+		assert.deepEqual(refreshed.attributes.keywords, ["alpha"]);
+		assert.equal(refreshed.attributes.language, "en");
+		assert.equal(refreshed.attributes.subtype, "article");
+		assert.ok(
+			refreshed.attributes.fetched_at > Date.now() - 1000,
+			"fetched_at stamped fresh",
+		);
+	});
+
+	it("metadata line is omitted when every source field is empty", async () => {
+		const handler = captureHandler();
+		const setCalls = [];
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			signal: new AbortController().signal,
+			entries: { set: async () => {} },
+			getEntries: async () => [],
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origSearch = WebFetcher.prototype.search;
+		const origFetchAll = WebFetcher.prototype.fetchAll;
+		WebFetcher.prototype.search = async () => [
+			{
+				url: "https://bare.example/page",
+				title: "Bare",
+				description: "",
+				extra_snippets: [],
+				page_age: null,
+				age: null,
+				language: null,
+				content_type: null,
+				subtype: null,
+				profile: null,
+				meta_url: null,
+				keywords: null,
+				engine: "searxng",
+			},
+		];
+		WebFetcher.prototype.fetchAll = async () => [
+			{
+				status: "fulfilled",
+				value: {
+					title: "Bare",
+					content: "x",
+					excerpt: null,
+					byline: null,
+					siteName: null,
+				},
+			},
+		];
+
+		try {
+			await handler(
+				{ attributes: { path: "q" }, resultPath: "log://turn_5/search/q" },
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.search = origSearch;
+			WebFetcher.prototype.fetchAll = origFetchAll;
+		}
+
+		const log = setCalls.find((c) => c.path === "log://turn_5/search/q");
+		const lines = log.body.split("\n");
+		const bullet = lines.findIndex((l) => l.startsWith("* "));
+		assert.ok(bullet >= 0, "result bullet present");
+		const next = lines[bullet + 1];
+		assert.ok(
+			next === undefined || next === "" || next.startsWith("* "),
+			`expected no metadata indent line after bare bullet, got: ${JSON.stringify(next)}`,
 		);
 	});
 });
