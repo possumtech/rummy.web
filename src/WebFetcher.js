@@ -301,10 +301,14 @@ export default class WebFetcher {
 	 * (e.g. SearXNG path, or per-result when Brave didn't supply them).
 	 *
 	 * Returns [{
-	 *   url, title, description, extra_snippets,
+	 *   url, title, description,
 	 *   page_age, age, language, content_type, subtype,
 	 *   profile, meta_url, keywords, engine
 	 * }].
+	 *
+	 * `description` is decoded — HTML entities resolved and `<strong>`
+	 * highlight tags stripped — at this boundary so callers handle plain
+	 * text.
 	 */
 	async search(query, { limit = 12, language = "en" } = {}) {
 		if (SEARCH_BACKEND === "brave") return this.#searchBrave(query, { limit });
@@ -330,8 +334,7 @@ export default class WebFetcher {
 		return (data.results || []).slice(0, limit).map((r) => ({
 			url: r.url,
 			title: r.title,
-			description: r.content || "",
-			extra_snippets: [],
+			description: decodeText(r.content || ""),
 			page_age: null,
 			age: null,
 			language: null,
@@ -350,7 +353,6 @@ export default class WebFetcher {
 		const url = new URL("https://api.search.brave.com/res/v1/web/search");
 		url.searchParams.set("q", query);
 		url.searchParams.set("count", String(Math.min(limit, 20)));
-		url.searchParams.set("extra_snippets", "true");
 
 		const response = await fetch(url, {
 			headers: {
@@ -367,8 +369,7 @@ export default class WebFetcher {
 		return (data.web?.results || []).slice(0, limit).map((r) => ({
 			url: r.url,
 			title: r.title,
-			description: r.description || "",
-			extra_snippets: Array.isArray(r.extra_snippets) ? r.extra_snippets : [],
+			description: decodeText(r.description || ""),
 			page_age: r.page_age || null,
 			age: r.age || null,
 			language: r.language || null,
@@ -435,4 +436,38 @@ export function normalizeKeywords(schemas) {
 	};
 	visit(schemas);
 	return collected.size > 0 ? [...collected] : null;
+}
+
+// Brave returns descriptions with HTML entities (`&amp;`, `&#39;`,
+// `&hellip;`) and `<strong>` highlight tags around query matches. Both
+// are noise in the markdown listing — strip the tags, decode the
+// entities. Covers the named entities Brave actually emits plus numeric
+// (`&#39;`, `&#x27;`) for anything else. Exported only for testability.
+const NAMED_ENTITIES = {
+	amp: "&",
+	lt: "<",
+	gt: ">",
+	quot: '"',
+	apos: "'",
+	nbsp: " ",
+	hellip: "…",
+	mdash: "—",
+	ndash: "–",
+	lsquo: "‘",
+	rsquo: "’",
+	ldquo: "“",
+	rdquo: "”",
+};
+const ENTITY_RE = /&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi;
+const HIGHLIGHT_RE = /<\/?(?:strong|em|b|i)>/gi;
+
+export function decodeText(text) {
+	if (!text) return text;
+	return text
+		.replace(HIGHLIGHT_RE, "")
+		.replace(ENTITY_RE, (m, dec, hex, name) => {
+			if (dec) return String.fromCodePoint(Number(dec));
+			if (hex) return String.fromCodePoint(Number.parseInt(hex, 16));
+			return NAMED_ENTITIES[name?.toLowerCase()] ?? m;
+		});
 }

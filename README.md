@@ -65,7 +65,7 @@ Queries the configured search backend, fetches each result in parallel, archives
 - Results default to 12; set the `results` attribute to limit.
 - Every candidate URL is fetched in parallel (10s timeout) — to validate reachability, measure token cost, and archive the body for a zero-network `<get>`. Candidates already archived within the last 10 minutes are served from the existing entry; only stale or new URLs hit the network.
 - Unreachable results (404, timeout, network error) are dropped from the listing. The header reports `N of M results (M-N unreachable)` so the model knows some were filtered.
-- The search log entry's body is a markdown bullet list. Each result renders as `* URL — title (N tokens)` followed (when populated) by an indented metadata line (`Publisher · date · lang · type`), the description, and up to two bulleted extra snippets. The leading `*` is load-bearing: it marks the body as rendered output the model has no training prior for emitting as a tool. Token count is the signal for the model's "which one is worth promoting" decision.
+- The search log entry's body is a markdown bullet list. Each result renders as `* URL — title (N tokens)` followed (when populated) by an indented metadata line (`Publisher · date · lang · type`) and the description. The leading `*` is load-bearing: it marks the body as rendered output the model has no training prior for emitting as a tool. Token count is the signal for the model's "which one is worth promoting" decision.
 - Each successfully-fetched URL lands as an archived `<https>` entry (`state: "resolved"`, `visibility: "archived"`) with the body and `{title, excerpt, byline, siteName}` attributes. `<get>` on a listed URL becomes a pure visibility flip; no re-fetch.
 - Hard-capped at `RUMMY_WEB_SEARCH_MAX` searches per turn; further searches are refused (error logged with status 429).
 
@@ -123,13 +123,13 @@ Returns `Promise.allSettled` — array of `{ status, value }` objects, each valu
 
 ```javascript
 [{
-  url, title, description, extra_snippets,
+  url, title, description,
   page_age, age, language, content_type, subtype,
   profile, meta_url, keywords, engine,
 }]
 ```
 
-Both backends return the same shape; Brave-only fields are `null` (or `[]` for `extra_snippets`) on the SearXNG path, and per-result when Brave didn't supply them. `keywords` is normalized from Brave's `schemas` (schema.org JSON-LD) — see `normalizeKeywords` in `WebFetcher.js`.
+Both backends return the same shape; Brave-only fields are `null` on the SearXNG path, and per-result when Brave didn't supply them. `description` is decoded at this boundary — `<strong>` highlight tags stripped, HTML entities resolved (named, decimal, hex) — so callers receive plain text. `keywords` is normalized from Brave's `schemas` (schema.org JSON-LD) — see `normalizeKeywords` in `WebFetcher.js`.
 
 ### `WebFetcher.cleanUrl(raw)`
 

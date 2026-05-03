@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import http from "node:http";
 import { after, before, describe, it } from "node:test";
-import WebFetcher, { normalizeKeywords } from "./WebFetcher.js";
+import WebFetcher, { decodeText, normalizeKeywords } from "./WebFetcher.js";
 
 describe("WebFetcher", () => {
 	describe("cleanUrl", () => {
@@ -180,6 +180,39 @@ describe("WebFetcher", () => {
 				keywords: ["valid", 42, null, { nested: "ignored" }, "ok"],
 			});
 			assert.deepEqual(out, ["valid", "ok"]);
+		});
+	});
+
+	// Brave returns descriptions and titles with HTML entities
+	// (`&amp;`, `&#39;`) and `<strong>` highlight tags around query
+	// matches. decodeText is the boundary cleanup.
+	describe("decodeText", () => {
+		it("strips <strong> and <em> highlight tags", () => {
+			assert.equal(
+				decodeText("Node.js <strong>streams</strong> and <em>buffers</em>"),
+				"Node.js streams and buffers",
+			);
+		});
+
+		it("decodes named entities Brave actually emits", () => {
+			assert.equal(
+				decodeText("Tom &amp; Jerry &mdash; &ldquo;hello&rdquo; &hellip;"),
+				"Tom & Jerry — “hello” …",
+			);
+		});
+
+		it("decodes numeric (decimal and hex) entities", () => {
+			assert.equal(decodeText("it&#39;s &#x27;ok&#x27;"), "it's 'ok'");
+		});
+
+		it("preserves unrecognized entities verbatim", () => {
+			assert.equal(decodeText("&unknownentity; stays"), "&unknownentity; stays");
+		});
+
+		it("returns empty/null inputs unchanged", () => {
+			assert.equal(decodeText(""), "");
+			assert.equal(decodeText(null), null);
+			assert.equal(decodeText(undefined), undefined);
 		});
 	});
 });

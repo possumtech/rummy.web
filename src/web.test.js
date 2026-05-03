@@ -846,7 +846,7 @@ describe("RummyWeb — run-end context cleanup", () => {
 // Rich Brave metadata flows from `search` results through both the
 // search-log listing and the per-URL archive attributes.
 describe("RummyWeb — Brave-rich rendering and refresh", () => {
-	it("search log entry renders metadata line, description, and capped extra_snippets", async () => {
+	it("search log entry renders metadata line and description; archives the full Brave attribute set", async () => {
 		const handler = captureHandler();
 		const setCalls = [];
 		const rummy = {
@@ -869,7 +869,6 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 				url: "https://a.example/page",
 				title: "Page A",
 				description: "Description A.",
-				extra_snippets: ["snippet-1", "snippet-2", "snippet-3", "snippet-4"],
 				page_age: "2024-08-12T10:00:00",
 				language: "en",
 				subtype: "article",
@@ -913,14 +912,6 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 			"Brave description listed",
 		);
 		assert.ok(
-			log.body.includes("· snippet-1") && log.body.includes("· snippet-2"),
-			"first two extra_snippets rendered",
-		);
-		assert.ok(
-			!log.body.includes("snippet-3") && !log.body.includes("snippet-4"),
-			"extra_snippets capped at 2 in the listing",
-		);
-		assert.ok(
 			log.body.includes("Page A"),
 			"Brave title wins over Readability title",
 		);
@@ -932,8 +923,11 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 		assert.equal(archived.attributes.title, "Page A");
 		assert.equal(archived.attributes.description, "Description A.");
 		assert.deepEqual(archived.attributes.keywords, ["alpha", "beta"]);
-		assert.equal(archived.attributes.extra_snippets.length, 4);
 		assert.equal(archived.attributes.profile.long_name, "Example Publisher");
+		assert.ok(
+			!("extra_snippets" in archived.attributes),
+			"extra_snippets is not persisted (more noise than signal)",
+		);
 	});
 
 	it("<get> stale-refresh preserves Brave attributes the new fetch can't know", async () => {
@@ -946,7 +940,6 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 			attributes: {
 				title: "Old Title",
 				description: "Brave description",
-				extra_snippets: ["e1", "e2"],
 				profile: { long_name: "Example Publisher" },
 				keywords: ["alpha"],
 				language: "en",
@@ -1003,7 +996,6 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 			"Brave description",
 			"Brave description preserved across refresh",
 		);
-		assert.deepEqual(refreshed.attributes.extra_snippets, ["e1", "e2"]);
 		assert.equal(refreshed.attributes.profile.long_name, "Example Publisher");
 		assert.deepEqual(refreshed.attributes.keywords, ["alpha"]);
 		assert.equal(refreshed.attributes.language, "en");
@@ -1037,7 +1029,6 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 				url: "https://bare.example/page",
 				title: "Bare",
 				description: "",
-				extra_snippets: [],
 				page_age: null,
 				age: null,
 				language: null,

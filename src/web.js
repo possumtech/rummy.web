@@ -25,7 +25,7 @@ function isFresh(entry, now = Date.now()) {
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web (ONE per turn)
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (narrow the result count)
-* Results listed in the search's log entry as a markdown bullet list. Each result shows: \`* URL — title (N tokens)\` followed by indented metadata (publisher · date · language · type) and one or more query-relevant snippets. Token count is the page's real cost if you <get> it; use it to pick.
+* Results listed in the search's log entry as a markdown bullet list. Each result shows: \`* URL — title (N tokens)\` followed by indented metadata (publisher · date · language · type) and the page's description. Token count is the page's real cost if you <get> it; use it to pick.
 * Unreachable URLs are dropped; the header reports \`N of M results (M-N unreachable)\` when any were filtered.
 * Use <get path="https://example.com/page"/> on a result URL to promote it into context (already fetched during search; <get> is a pure promote, no second round trip).
 * **ONE \`<search>\` per turn.** Additional searches the same turn are refused.`;
@@ -214,7 +214,6 @@ export default class RummyWeb {
 				attributes: {
 					title: r.title || fetched.title,
 					description: r.description || null,
-					extra_snippets: r.extra_snippets || [],
 					page_age: r.page_age,
 					age: r.age,
 					language: r.language,
@@ -301,9 +300,9 @@ export default class RummyWeb {
 
 		const header = fetched.title ? `# ${fetched.title}\n\n` : "";
 		// Preserve any existing Brave-side attributes (description,
-		// extra_snippets, page_age, profile, …) when refreshing a stale
-		// entry. Brave metadata isn't available on the direct-<get> path,
-		// so overwriting attributes wholesale would silently downgrade an
+		// page_age, profile, keywords, …) when refreshing a stale entry.
+		// Brave metadata isn't available on the direct-<get> path, so
+		// overwriting attributes wholesale would silently downgrade an
 		// entry that was originally archived via <search>.
 		const existingAttrs =
 			existing.length > 0
@@ -334,13 +333,8 @@ export default class RummyWeb {
 		if (attrs.title) lines.push(`## ${attrs.title}`);
 		const meta = metadataLine(attrs);
 		if (meta) lines.push(meta);
-		const desc = attrs.description || attrs.excerpt || attrs.snippet;
+		const desc = attrs.description || attrs.excerpt;
 		if (desc) lines.push(desc);
-		if (Array.isArray(attrs.extra_snippets)) {
-			for (const s of attrs.extra_snippets) {
-				if (s) lines.push(`* ${s}`);
-			}
-		}
 		return lines.join("\n");
 	}
 
@@ -381,21 +375,14 @@ function metadataLine(attrs) {
 	return parts.length > 0 ? parts.join(" · ") : null;
 }
 
-// Per-result block in the search log. Caps extra_snippets at 2 to keep
-// the menu dense — the rest live in attributes for the post-demotion
-// summarized view, where the model has already chosen and is curating
-// context.
+// Per-result block in the search log: bullet line + optional indented
+// metadata line + optional description. extra_snippets are deliberately
+// not rendered (more noise than signal in the listing).
 function renderResult({ url, title, tokens, brave }) {
 	const head = title ? `${url} — ${title}` : url;
 	const lines = [`* ${head} (${tokens} tokens)`];
 	const meta = metadataLine(brave);
 	if (meta) lines.push(`  ${meta}`);
 	if (brave?.description) lines.push(`  ${brave.description}`);
-	const snippets = Array.isArray(brave?.extra_snippets)
-		? brave.extra_snippets.slice(0, 2)
-		: [];
-	for (const s of snippets) {
-		if (s) lines.push(`    · ${s}`);
-	}
 	return lines;
 }
