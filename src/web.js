@@ -1,4 +1,11 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import WebFetcher from "./WebFetcher.js";
+
+const SEARCH_DOCS = readFileSync(
+	fileURLToPath(new URL("./search.md", import.meta.url)),
+	"utf8",
+);
 
 const MAX_SEARCHES_PER_TURN = Number(process.env.RUMMY_WEB_SEARCH_MAX);
 const SEARCH_RESULTS_DEFAULT = Number(process.env.RUMMY_WEB_SEARCH_RESULTS);
@@ -21,14 +28,6 @@ function isFresh(entry, now = Date.now()) {
 	if (!attrs.fetched_at) return false;
 	return now - attrs.fetched_at < CACHE_TTL_MS;
 }
-
-const SEARCH_DOCS = `## <search>[query]</search> - Search the web (ONE per turn)
-Example: <search>node.js streams backpressure</search>
-Example: <search results="5">SQLite WAL mode</search> (narrow the result count)
-* Results listed in the search's log entry as a markdown bullet list. Each result shows: \`* URL — title (N tokens)\` followed (when populated) by the page's date and description. Token count is the page's real cost if you <get> it; use it to pick.
-* Unreachable URLs are dropped; the header reports \`N of M results (M-N unreachable)\` when any were filtered.
-* Use <get path="https://example.com/page"/> on a result URL to promote it into context (already fetched during search; <get> is a pure promote, no second round trip).
-* **ONE \`<search>\` per turn.** Additional searches the same turn are refused.`;
 
 export default class RummyWeb {
 	#core;
@@ -232,10 +231,7 @@ export default class RummyWeb {
 			});
 		}
 
-		const header =
-			valid.length === results.length
-				? `${results.length} results for "${query}"`
-				: `${valid.length} of ${results.length} results for "${query}" (${results.length - valid.length} unreachable)`;
+		const header = `${valid.length} results for "${query}"`;
 		// Markdown bullet list, NOT XML or tool-shape: leading `*` is the
 		// load-bearing signal that this body is rendered output, not
 		// anything the model would type as a query.

@@ -219,10 +219,7 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 				"first result prefixed with markdown bullet (* URL …)",
 			);
 			assert.ok(logWrite.body.includes("Page A"), "title listed");
-			assert.ok(
-				logWrite.body.includes("content A"),
-				"SearXNG content listed",
-			);
+			assert.ok(logWrite.body.includes("content A"), "SearXNG content listed");
 			assert.ok(
 				logWrite.body.includes("* https://b.example/page"),
 				"second result prefixed with markdown bullet",
@@ -237,7 +234,7 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			);
 		});
 
-		it("drops unreachable results from the listing and reports the count", async () => {
+		it("drops unreachable results from the listing", async () => {
 			const handler = captureHandler();
 			const setCalls = [];
 			const rummy = {
@@ -292,8 +289,8 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			const logWrite = setCalls.find((c) => c.path === "log://turn_5/search/q");
 			assert.ok(logWrite);
 			assert.ok(
-				logWrite.body.includes('1 of 3 results for "q" (2 unreachable)'),
-				"header reports valid/total count and unreachable count",
+				logWrite.body.includes('1 results for "q"'),
+				"header reports the valid count only — no filter-noise the model doesn't need",
 			);
 			assert.ok(logWrite.body.includes("https://ok.example/page"));
 			assert.ok(!logWrite.body.includes("https://gone.example/404"));

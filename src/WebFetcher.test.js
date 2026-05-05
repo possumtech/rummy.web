@@ -142,5 +142,4 @@ describe("WebFetcher", () => {
 			await bPromise;
 		});
 	});
-
 });
