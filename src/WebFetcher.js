@@ -56,8 +56,6 @@ function wrapText(text, width) {
 
 const FETCH_TIMEOUT = Number(process.env.RUMMY_WEB_FETCH_TIMEOUT);
 const IDLE_TIMEOUT = 15 * 60 * 1000; // 15 minutes
-const SEARCH_BACKEND = process.env.RUMMY_WEB_SEARCH_BACKEND;
-const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
 // Connect to a remote chromium via CDP instead of launching a local one.
 // Lets multiple rummy processes share a single chromium; each process
 // still opens its own BrowserContext per run for isolation.
@@ -114,7 +112,10 @@ export default class WebFetcher {
 			this.#launching = (async () => {
 				const { chromium } = await import("playwright");
 				if (PLAYWRIGHT_WS) return chromium.connect(PLAYWRIGHT_WS);
-				const args = ["--disable-gpu", "--disable-dev-shm-usage"];
+				// Playwright's headless defaults already include
+				// --disable-dev-shm-usage, --disable-extensions, --no-first-run,
+				// and ~30 other automation flags. Only opt-in extras go here.
+				const args = [];
 				if (NO_SANDBOX) args.push("--no-sandbox");
 				if (CHROMIUM_HEAP_MB) {
 					args.push(`--js-flags=--max-old-space-size=${CHROMIUM_HEAP_MB}`);
@@ -122,9 +123,20 @@ export default class WebFetcher {
 				return chromium.launch({ headless: true, args });
 			})();
 		}
-		this.#browser = await this.#launching;
+		const browser = await this.#launching;
 		this.#launching = null;
-		return this.#browser;
+		// If chromium dies (OOM, segfault, WS teardown) the Browser handle
+		// goes stale — next newContext() rejects opaquely. Drop the
+		// singleton + per-run contexts on 'disconnected' so the next
+		// #getBrowser() relaunches cleanly.
+		browser.on("disconnected", () => {
+			if (this.#browser === browser) {
+				this.#browser = null;
+				this.#contexts.clear();
+			}
+		});
+		this.#browser = browser;
+		return browser;
 	}
 
 	/**
@@ -296,26 +308,13 @@ export default class WebFetcher {
 	}
 
 	/**
-	 * Search the web. Dispatches to the configured backend. Both backends
-	 * return the same shape; Brave-only fields are null when unavailable
-	 * (e.g. SearXNG path, or per-result when Brave didn't supply them).
-	 *
-	 * Returns [{
-	 *   url, title, description,
-	 *   page_age, age, language, content_type, subtype,
-	 *   profile, meta_url, keywords, engine
-	 * }].
-	 *
-	 * `description` is decoded — HTML entities resolved and `<strong>`
-	 * highlight tags stripped — at this boundary so callers handle plain
-	 * text.
+	 * Search via SearXNG. Returns SearXNG's native per-result shape verbatim
+	 * (sliced to `limit`) — `{ url, title, content, engine, engines,
+	 * publishedDate, score, category, thumbnail, ... }`. SearXNG normalizes
+	 * upstream engines (Brave, DuckDuckGo, Wikipedia, …) into this common
+	 * shape; we take it as gospel.
 	 */
 	async search(query, { limit = 12, language = "en" } = {}) {
-		if (SEARCH_BACKEND === "brave") return this.#searchBrave(query, { limit });
-		return this.#searchSearxng(query, { limit, language });
-	}
-
-	async #searchSearxng(query, { limit, language }) {
 		const base = process.env.RUMMY_WEB_SEARXNG_URL;
 		if (!base) throw new Error("RUMMY_WEB_SEARXNG_URL not configured");
 
@@ -331,55 +330,7 @@ export default class WebFetcher {
 			throw new Error(`SearXNG ${response.status}: ${response.statusText}`);
 		}
 		const data = await response.json();
-		return (data.results || []).slice(0, limit).map((r) => ({
-			url: r.url,
-			title: r.title,
-			description: decodeText(r.content || ""),
-			page_age: null,
-			age: null,
-			language: null,
-			content_type: null,
-			subtype: null,
-			profile: null,
-			meta_url: null,
-			keywords: null,
-			engine: r.engine,
-		}));
-	}
-
-	async #searchBrave(query, { limit }) {
-		if (!BRAVE_API_KEY) throw new Error("BRAVE_API_KEY not configured");
-
-		const url = new URL("https://api.search.brave.com/res/v1/web/search");
-		url.searchParams.set("q", query);
-		url.searchParams.set("count", String(Math.min(limit, 20)));
-
-		const response = await fetch(url, {
-			headers: {
-				Accept: "application/json",
-				"Accept-Encoding": "gzip",
-				"X-Subscription-Token": BRAVE_API_KEY,
-			},
-			signal: AbortSignal.timeout(FETCH_TIMEOUT),
-		});
-		if (!response.ok) {
-			throw new Error(`Brave ${response.status}: ${response.statusText}`);
-		}
-		const data = await response.json();
-		return (data.web?.results || []).slice(0, limit).map((r) => ({
-			url: r.url,
-			title: r.title,
-			description: decodeText(r.description || ""),
-			page_age: r.page_age || null,
-			age: r.age || null,
-			language: r.language || null,
-			content_type: r.content_type || null,
-			subtype: r.subtype || null,
-			profile: r.profile || null,
-			meta_url: r.meta_url || null,
-			keywords: normalizeKeywords(r.schemas),
-			engine: "brave",
-		}));
+		return (data.results || []).slice(0, limit);
 	}
 
 	/**
@@ -402,72 +353,4 @@ export default class WebFetcher {
 		}
 		this.#launching = null;
 	}
-}
-
-// schema.org `keywords` ships in three documented shapes (string with
-// commas, array of strings, absent) and Brave returns the parent
-// `schemas` field as either an object or an array of objects depending
-// on what the page emits. Walk the structure, collect any string value
-// reached via a `keywords` key, casefold + trim + dedup. Exported only
-// for testability.
-export function normalizeKeywords(schemas) {
-	if (!schemas) return null;
-	const collected = new Set();
-	const visit = (node) => {
-		if (!node) return;
-		if (Array.isArray(node)) {
-			for (const item of node) visit(item);
-			return;
-		}
-		if (typeof node !== "object") return;
-		const kw = node.keywords;
-		if (typeof kw === "string") {
-			for (const tag of kw.split(",")) {
-				const t = tag.trim().toLowerCase();
-				if (t) collected.add(t);
-			}
-		} else if (Array.isArray(kw)) {
-			for (const tag of kw) {
-				if (typeof tag !== "string") continue;
-				const t = tag.trim().toLowerCase();
-				if (t) collected.add(t);
-			}
-		}
-	};
-	visit(schemas);
-	return collected.size > 0 ? [...collected] : null;
-}
-
-// Brave returns descriptions with HTML entities (`&amp;`, `&#39;`,
-// `&hellip;`) and `<strong>` highlight tags around query matches. Both
-// are noise in the markdown listing — strip the tags, decode the
-// entities. Covers the named entities Brave actually emits plus numeric
-// (`&#39;`, `&#x27;`) for anything else. Exported only for testability.
-const NAMED_ENTITIES = {
-	amp: "&",
-	lt: "<",
-	gt: ">",
-	quot: '"',
-	apos: "'",
-	nbsp: " ",
-	hellip: "…",
-	mdash: "—",
-	ndash: "–",
-	lsquo: "‘",
-	rsquo: "’",
-	ldquo: "“",
-	rdquo: "”",
-};
-const ENTITY_RE = /&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi;
-const HIGHLIGHT_RE = /<\/?(?:strong|em|b|i)>/gi;
-
-export function decodeText(text) {
-	if (!text) return text;
-	return text
-		.replace(HIGHLIGHT_RE, "")
-		.replace(ENTITY_RE, (m, dec, hex, name) => {
-			if (dec) return String.fromCodePoint(Number(dec));
-			if (hex) return String.fromCodePoint(Number.parseInt(hex, 16));
-			return NAMED_ENTITIES[name?.toLowerCase()] ?? m;
-		});
 }

@@ -153,20 +153,14 @@ Web-relevant schemes registered by this plugin:
 
 ### Entry Attributes
 
-`https://` entries are created by both `<search>` (archived per candidate, with full Brave metadata) and `<get>` (visible on demand, Readability-only). The attribute set:
+`https://` entries are created by both `<search>` (archived per candidate, with SearXNG metadata) and `<get>` (visible on demand, Readability-only). The attribute set:
 
 ```json
 {
     "title": "Page Title",
-    "description": "Brave's editorial description (entities decoded, highlights stripped)",
-    "page_age": "2024-08-12T10:00:00",
-    "age": "1 month ago",
-    "language": "en",
-    "content_type": "article",
-    "subtype": "article",
-    "profile": { "long_name": "Example Publisher", "name": "example.com" },
-    "meta_url": { "scheme": "https", "netloc": "example.com" },
-    "keywords": ["alpha", "beta"],
+    "content": "SearXNG's per-result snippet (lxml-extracted upstream)",
+    "publishedDate": "2024-08-12T10:00:00",
+    "engine": "brave",
     "excerpt": "Readability's first-paragraph excerpt",
     "byline": "Author Name",
     "siteName": "example.com",
@@ -174,11 +168,11 @@ Web-relevant schemes registered by this plugin:
 }
 ```
 
-The Brave-side fields (`description` through `keywords`) populate when search archived the entry; they're `null`/`[]` on direct-`<get>` entries. Readability-side fields (`excerpt`, `byline`, `siteName`) populate from extraction. On stale-refresh via `<get>`, the new Readability fields override their counterparts and Brave-side fields are preserved as-is via attribute spread.
+The SearXNG-side fields (`content`, `publishedDate`, `engine`) populate when search archived the entry; they're `null` on direct-`<get>` entries. Readability-side fields (`excerpt`, `byline`, `siteName`) populate from extraction. On stale-refresh via `<get>`, the new Readability fields override their counterparts and SearXNG-side fields are preserved as-is via attribute spread.
 
 `fetched_at` is `Date.now()` at write time. It's the freshness signal for the 10-minute cache check applied by both `<search>` (skip refetch of fresh candidates) and `<get>` (skip refetch of fresh existing entries).
 
-The search log entry (`log://turn_N/search/{slug}`) carries `{ query }` as its attributes. Body is a markdown bullet list — per-result block as `* URL — title (N tokens)` with optional indented `Publisher · date · lang · type` metadata and the description.
+The search log entry (`log://turn_N/search/{slug}`) carries `{ query }` as its attributes. Body is a markdown bullet list — per-result block as `* URL — title (N tokens)` with optional indented `YYYY-MM-DD` date line and the page description.
 
 ## RummyWeb Registration
 
@@ -216,12 +210,12 @@ All registration is cross-scheme (`core.name` is `"web"`, but it registers on `s
 1. Extract query from `attrs.path` or `entry.body`.
 2. If `rummy.noWeb`, emit a 403 via `rummy.hooks.error.log.emit()` and return.
 3. Check per-turn search cap (`RUMMY_WEB_SEARCH_MAX`). If exceeded, emit a 429 via `rummy.hooks.error.log.emit()` and return.
-4. Query configured search backend (SearXNG or Brave).
+4. Query SearXNG (`/search?q=…&format=json&language=…`).
 5. Partition candidates against the cache: for each cleaned URL, look up an existing entry. If one exists and `attributes.fetched_at` is younger than `CACHE_TTL_MS` (10 min), reuse it; otherwise queue for fetch.
 6. Fetch the queued (stale or new) URLs in parallel via `fetcher.fetchAll(urls, { timeout: 10000 })` to validate reachability, measure token cost, and capture the body. If everything was cached, the network call is skipped entirely.
 7. Drop any freshly-fetched result whose fetch failed (network error) or whose content extraction errored (404, timeout, etc.).
-8. For each fresh survivor, archive the body as an `<https>` entry: `path: cleanUrl`, `state: "resolved"`, `visibility: "archived"`, body `# {title}\n\n{content}`, attributes carry the Brave-side set (`description`, `page_age`, `age`, `language`, `content_type`, `subtype`, `profile`, `meta_url`, `keywords`) plus the Readability-side set (`excerpt`, `byline`, `siteName`) plus `title` and `fetched_at`. Cached survivors are reused as-is — no rewrite.
-9. Build the result listing as a markdown bullet list. Each result: `* URL — title (N tokens)`; then an indented `Publisher · date · lang · type` line if any of those are populated; then the description if present. Header reports `valid/total` count when any were dropped. The `*` prefix is load-bearing — it makes the body unambiguously rendered output, not something the model would emit as a tool.
+8. For each fresh survivor, archive the body as an `<https>` entry: `path: cleanUrl`, `state: "resolved"`, `visibility: "archived"`, body `# {title}\n\n{content}`, attributes carry the SearXNG-side set (`content`, `publishedDate`, `engine`) plus the Readability-side set (`excerpt`, `byline`, `siteName`) plus `title` and `fetched_at`. Cached survivors are reused as-is — no rewrite.
+9. Build the result listing as a markdown bullet list. Each result: `* URL — title (N tokens)`; then an indented `YYYY-MM-DD` date line if `publishedDate` is set; then the description if present. Header reports `valid/total` count when any were dropped. The `*` prefix is load-bearing — it makes the body unambiguously rendered output, not something the model would emit as a tool.
 10. Store the listing at `entry.resultPath` with state `"resolved"` and `{ query }` attributes.
 
 A subsequent `<get>` on any listed URL hits the existing-entry short-circuit in the get handler and is promoted to `visible` without a second round trip.
@@ -241,13 +235,13 @@ Priority 5 runs before the core get handler at priority 10.
 
 **Visible** (`http`/`https`): pass-through `entry.body` — the full markdown content.
 
-**Summarized** (`http`/`https`): compact card from attributes. Brave-first with Readability fallback:
+**Summarized** (`http`/`https`): compact card from attributes:
 ```
 ## Page Title
-Publisher · 2024-08-12 · en · article
-Description (or excerpt fallback)
+2024-08-12 · example.com
+Content (or excerpt fallback)
 ```
-Publisher reads `profile.long_name || profile.name || siteName || byline`. The metadata line is omitted entirely if every field resolves empty.
+Date comes from SearXNG's `publishedDate` (sliced to `YYYY-MM-DD`); publisher comes from Readability's `siteName || byline` since SearXNG doesn't expose a publisher field. The metadata line is omitted entirely if both resolve empty.
 
 **Visible** (`search`): `# search "query"\n{url listing}`
 
@@ -298,7 +292,7 @@ Model emits <search>query</search>
     → Partitions candidates: fresh archives (fetched_at < 10 min) reused as-is; stale/new go to fetchAll()
     → Fetches the stale/new subset in parallel to validate + measure tokens
     → Archives each fresh survivor as an <https> entry (visibility: "archived", fetched_at stamped); drops unreachable
-    → Stores (* URL — title (N tokens) + metadata + description + ≤2 extras) bullet listing at entry.resultPath
+    → Stores (* URL — title (N tokens) + optional date + content) bullet listing at entry.resultPath
   → hooks.entry.created.emit(entry)
 ```
 
@@ -319,7 +313,13 @@ Client sends { method: "get", path: "https://example.com", run: "myrun" }
 
 A single chromium browser is shared across all runs in a fetcher; each run gets its own `BrowserContext` (cookies, localStorage, cache) so there's no cross-run bleed. Contexts are keyed on `rummy.runId` in `WebFetcher#contexts` (a `Map`). The browser stays warm until the 15-minute idle timer fires (`close()`); contexts are released earlier — either at run end (clean) or on abort.
 
-Local launches pass `--disable-gpu --disable-dev-shm-usage`, plus optionally `--no-sandbox` (`RUMMY_WEB_NO_SANDBOX=1`) and `--js-flags=--max-old-space-size=N` (`RUMMY_WEB_CHROMIUM_HEAP_MB=N`). Setting `RUMMY_WEB_PLAYWRIGHT_WS=ws://...` swaps the local launch for `chromium.connect()` against a remote chromium — multiple rummy processes can then share one browser process while still having per-run context isolation.
+Local launches pass no extra args by default — Playwright's headless mode already injects `--disable-dev-shm-usage`, `--disable-extensions`, `--no-first-run`, and ~30 other automation flags, so duplicating them here would just be ceremony. Opt-in extras: `--no-sandbox` (`RUMMY_WEB_NO_SANDBOX=1`) and `--js-flags=--max-old-space-size=N` (`RUMMY_WEB_CHROMIUM_HEAP_MB=N`). Setting `RUMMY_WEB_PLAYWRIGHT_WS=ws://...` swaps the local launch for `chromium.connect()` against a remote chromium — multiple rummy processes can then share one browser process while still having per-run context isolation.
+
+### Browser Disconnect Recovery
+
+`#getBrowser()` registers a `browser.on("disconnected", …)` listener on every launched/connected `Browser` instance. When chromium dies (OOM, segfault, CDP sidecar teardown), Playwright fires the `disconnected` event and the listener nulls `#browser` and clears `#contexts` so the next operation triggers a fresh launch via the lazy-init path. Without this, the `Browser` handle goes stale and every subsequent `newContext()` would reject opaquely.
+
+The listener guards on `this.#browser === browser` — a late `disconnected` from a previously-replaced browser is a no-op against the new singleton (handles relaunch races cleanly). `#contexts.clear()` skips per-context `close()` calls because their underlying browser is already gone; calling close() would either no-op or reject.
 
 ### Run-End Context Cleanup
 
@@ -353,20 +353,13 @@ The non-HTML branch exists because Chromium doesn't execute scripts on non-HTML 
 
 ### Search Backends
 
-**SearXNG** (`RUMMY_WEB_SEARCH_BACKEND=searxng`):
+**SearXNG** (the only backend):
 ```
 GET /search?q=...&format=json&language=en
-→ { results: [{ title, url, content, engine }] }
+→ { results: [{ url, title, content, engine, engines, publishedDate, score, category, thumbnail, ... }] }
 ```
 
-**Brave** (`RUMMY_WEB_SEARCH_BACKEND=brave`):
-```
-GET https://api.search.brave.com/res/v1/web/search?q=...&count=N
-Headers: X-Subscription-Token, Accept: application/json
-→ { web: { results: [{ title, url, description }] } }
-```
-
-Both normalize to `[{ url, title, description, page_age, age, language, content_type, subtype, profile, meta_url, keywords, engine }]`. SearXNG-only callers leave the Brave-specific fields as `null`. `description` is decoded at this boundary via `decodeText()` — `<strong>` highlight tags stripped, HTML entities resolved (named, decimal, hex). `keywords` is derived from Brave's `schemas` field via `normalizeKeywords()`, which walks the schema.org JSON-LD recursively and handles all three documented `keywords` shapes (CSV string, array of strings, absent), casefolding/trimming/deduping.
+`search()` returns SearXNG's per-result shape verbatim, sliced to `limit`. SearXNG itself federates upstream engines (Brave, DuckDuckGo, Wikipedia, …) and normalizes their output via `extract_text` (lxml) — content arrives already entity-decoded and stripped of highlight markup, so we don't post-process. Per-result `score` and `engines` (set of upstream engines that returned the URL) are SearXNG's quality and cross-engine-agreement signals.
 
 ### URL Normalization
 
@@ -390,8 +383,7 @@ All fetches use Playwright's Pixel 5 device profile — mobile user agent, 393x8
 | Scenario | Behavior |
 |---|---|
 | `RUMMY_WEB_SEARXNG_URL` not set | `search()` throws |
-| `BRAVE_API_KEY` not set | `search()` throws |
-| Search backend returns non-200 | `search()` throws with status |
+| SearXNG returns non-200 | `search()` throws with status |
 | Page returns 4xx/5xx | `fetch()` returns `{ error: "HTTP 404" }` |
 | Page load timeout | `fetch()` returns `{ error: message }` |
 | Readability parse fails | `fetch()` returns first 5000 chars of raw HTML |
@@ -433,9 +425,9 @@ Wikipedia's standard pages have deeply interleaved content and metadata; the mob
 
 Pixel 5 profile reduces page weight for sites serving responsive content.
 
-### Configurable search backends
+### SearXNG as the single backend
 
-SearXNG (self-hosted, private) and Brave Search API (hosted, API key) both normalize to the same result shape. Backend selection via `RUMMY_WEB_SEARCH_BACKEND` env var.
+The plugin used to support both SearXNG and Brave Search API directly, choosing between them via `RUMMY_WEB_SEARCH_BACKEND`. That dispatch is gone. SearXNG can itself federate to Brave (and many other engines) upstream and normalize them all into its own `MainResult` shape; we take that as gospel and removed the parallel direct-Brave path. The simplification deletes the API-key plumbing, the dual result-normalization, and a long list of Brave-specific helpers (`normalizeKeywords`, `decodeText`) and entry attributes (`page_age`, `age`, `language`, `content_type`, `subtype`, `profile`, `meta_url`, `keywords`, `extra_snippets`).
 
 ## Timeout Cascade
 

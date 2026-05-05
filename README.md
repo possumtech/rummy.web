@@ -1,6 +1,6 @@
 # @possumtech/rummy.web
 
-Web search and fetch plugin for [rummy](https://github.com/possumtech/rummy). Adds `<search>` and URL-aware `<get>` tools powered by Playwright, Mozilla Readability, and configurable search backends (SearXNG or Brave).
+Web search and fetch plugin for [rummy](https://github.com/possumtech/rummy). Adds `<search>` and URL-aware `<get>` tools powered by Playwright, Mozilla Readability, and a SearXNG backend (which itself federates upstream engines).
 
 ## Install
 
@@ -19,28 +19,20 @@ RUMMY_PLUGIN_WEB=@possumtech/rummy.web
 
 ### Search Backend
 
-SearXNG (default):
+SearXNG is the only backend — point it at a running instance:
 
 ```env
-RUMMY_WEB_SEARCH_BACKEND=searxng
 RUMMY_WEB_SEARXNG_URL=http://127.0.0.1:8888
 ```
 
-Brave Search API:
-
-```env
-RUMMY_WEB_SEARCH_BACKEND=brave
-BRAVE_API_KEY=your-api-key
-```
+SearXNG can itself federate to Brave, DuckDuckGo, Wikipedia, and many other engines (configured upstream in your SearXNG instance); we take its normalized output as gospel.
 
 ### Environment Variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `RUMMY_PLUGIN_WEB` | Yes | — | Set to `@possumtech/rummy.web` to load |
-| `RUMMY_WEB_SEARCH_BACKEND` | No | `searxng` | Search backend: `searxng` or `brave` |
-| `RUMMY_WEB_SEARXNG_URL` | If searxng | — | SearXNG base URL |
-| `BRAVE_API_KEY` | If brave | — | Brave Search API key |
+| `RUMMY_WEB_SEARXNG_URL` | Yes | — | SearXNG base URL |
 | `RUMMY_WEB_FETCH_TIMEOUT` | Yes | — | Timeout in ms for page loads and search requests |
 | `RUMMY_WEB_SEARCH_MAX` | Yes | — | Max `<search>` commands per turn |
 | `RUMMY_WEB_SEARCH_RESULTS` | Yes | — | Default candidate count when the model doesn't set `results=N` |
@@ -65,8 +57,8 @@ Queries the configured search backend, fetches each result in parallel, archives
 - Results default to 12; set the `results` attribute to limit.
 - Every candidate URL is fetched in parallel (10s timeout) — to validate reachability, measure token cost, and archive the body for a zero-network `<get>`. Candidates already archived within the last 10 minutes are served from the existing entry; only stale or new URLs hit the network.
 - Unreachable results (404, timeout, network error) are dropped from the listing. The header reports `N of M results (M-N unreachable)` so the model knows some were filtered.
-- The search log entry's body is a markdown bullet list. Each result renders as `* URL — title (N tokens)` followed (when populated) by an indented metadata line (`Publisher · date · lang · type`) and the description. The leading `*` is load-bearing: it marks the body as rendered output the model has no training prior for emitting as a tool. Token count is the signal for the model's "which one is worth promoting" decision.
-- Each successfully-fetched URL lands as an archived `<https>` entry (`state: "resolved"`, `visibility: "archived"`) with the body and `{title, excerpt, byline, siteName}` attributes. `<get>` on a listed URL becomes a pure visibility flip; no re-fetch.
+- The search log entry's body is a markdown bullet list. Each result renders as `* URL — title (N tokens)` followed (when populated) by an indented date line (`YYYY-MM-DD`) and the page's description. The leading `*` is load-bearing: it marks the body as rendered output the model has no training prior for emitting as a tool. Token count is the signal for the model's "which one is worth promoting" decision.
+- Each successfully-fetched URL lands as an archived `<https>` entry (`state: "resolved"`, `visibility: "archived"`) with the body and `{title, content, publishedDate, engine, excerpt, byline, siteName, fetched_at}` attributes. `<get>` on a listed URL becomes a pure visibility flip; no re-fetch.
 - Hard-capped at `RUMMY_WEB_SEARCH_MAX` searches per turn; further searches are refused (error logged with status 429).
 
 ### `<get>` — URL Fetch
@@ -121,15 +113,18 @@ Returns `Promise.allSettled` — array of `{ status, value }` objects, each valu
 
 ### `WebFetcher.search(query, opts?)` Response
 
+Returns SearXNG's native per-result shape verbatim, sliced to `limit`:
+
 ```javascript
 [{
-  url, title, description,
-  page_age, age, language, content_type, subtype,
-  profile, meta_url, keywords, engine,
+  url, title, content,
+  engine, engines,
+  publishedDate, score, category,
+  thumbnail, // … plus any other fields SearXNG emits
 }]
 ```
 
-Both backends return the same shape; Brave-only fields are `null` on the SearXNG path, and per-result when Brave didn't supply them. `description` is decoded at this boundary — `<strong>` highlight tags stripped, HTML entities resolved (named, decimal, hex) — so callers receive plain text. `keywords` is normalized from Brave's `schemas` (schema.org JSON-LD) — see `normalizeKeywords` in `WebFetcher.js`.
+`content` is the upstream snippet (already lxml-extracted by SearXNG — no entity-decode or highlight-strip needed on our side). `score` is SearXNG's per-result quality signal; `engines` is the set of upstream engines that returned this URL (a useful cross-backend agreement signal when SearXNG is configured with multiple engines).
 
 ### `WebFetcher.cleanUrl(raw)`
 

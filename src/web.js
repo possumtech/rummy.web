@@ -25,7 +25,7 @@ function isFresh(entry, now = Date.now()) {
 const SEARCH_DOCS = `## <search>[query]</search> - Search the web (ONE per turn)
 Example: <search>node.js streams backpressure</search>
 Example: <search results="5">SQLite WAL mode</search> (narrow the result count)
-* Results listed in the search's log entry as a markdown bullet list. Each result shows: \`* URL — title (N tokens)\` followed by indented metadata (publisher · date · language · type) and the page's description. Token count is the page's real cost if you <get> it; use it to pick.
+* Results listed in the search's log entry as a markdown bullet list. Each result shows: \`* URL — title (N tokens)\` followed (when populated) by the page's date and description. Token count is the page's real cost if you <get> it; use it to pick.
 * Unreachable URLs are dropped; the header reports \`N of M results (M-N unreachable)\` when any were filtered.
 * Use <get path="https://example.com/page"/> on a result URL to promote it into context (already fetched during search; <get> is a pure promote, no second round trip).
 * **ONE \`<search>\` per turn.** Additional searches the same turn are refused.`;
@@ -195,7 +195,7 @@ export default class RummyWeb {
 					url,
 					title: eAttrs.title || r.title,
 					tokens: e.tokens ?? countTokens(e.body),
-					brave: r,
+					src: r,
 				});
 				continue;
 			}
@@ -203,9 +203,11 @@ export default class RummyWeb {
 			const fetched = page?.status === "fulfilled" ? page.value : null;
 			if (!fetched || fetched.error) continue;
 			const titleHeader = fetched.title ? `# ${fetched.title}\n\n` : "";
-			// Brave-first metadata, with Readability fields preserved as
-			// fallbacks for the direct-<get> path (and for cases where Brave
-			// didn't emit a given field on this result).
+			// SearXNG-side fields (content, publishedDate, engine) come from
+			// the upstream search result. Readability-side fields (excerpt,
+			// byline, siteName) come from extracting the page itself. Both
+			// sets persist on the archived entry; #handleGet's stale-refresh
+			// preserves SearXNG-side via attribute spread.
 			await rummy.set({
 				path: url,
 				body: titleHeader + (fetched.content || ""),
@@ -213,15 +215,9 @@ export default class RummyWeb {
 				visibility: "archived",
 				attributes: {
 					title: r.title || fetched.title,
-					description: r.description || null,
-					page_age: r.page_age,
-					age: r.age,
-					language: r.language,
-					content_type: r.content_type,
-					subtype: r.subtype,
-					profile: r.profile,
-					meta_url: r.meta_url,
-					keywords: r.keywords,
+					content: r.content || null,
+					publishedDate: r.publishedDate || null,
+					engine: r.engine || null,
 					excerpt: fetched.excerpt,
 					byline: fetched.byline,
 					siteName: fetched.siteName,
@@ -232,7 +228,7 @@ export default class RummyWeb {
 				url,
 				title: r.title || fetched.title,
 				tokens: countTokens(fetched.content),
-				brave: r,
+				src: r,
 			});
 		}
 
@@ -299,11 +295,11 @@ export default class RummyWeb {
 		}
 
 		const header = fetched.title ? `# ${fetched.title}\n\n` : "";
-		// Preserve any existing Brave-side attributes (description,
-		// page_age, profile, keywords, …) when refreshing a stale entry.
-		// Brave metadata isn't available on the direct-<get> path, so
-		// overwriting attributes wholesale would silently downgrade an
-		// entry that was originally archived via <search>.
+		// Preserve SearXNG-side attributes (content, publishedDate, engine)
+		// when refreshing a stale entry. The direct-<get> path has no
+		// SearXNG result to draw from, so overwriting attributes wholesale
+		// would silently downgrade an entry that was originally archived
+		// via <search>.
 		const existingAttrs =
 			existing.length > 0
 				? typeof existing[0].attributes === "string"
@@ -325,15 +321,13 @@ export default class RummyWeb {
 		});
 	}
 
-	// Brave-first with Readability fallback. Both source families populate
-	// the same view; whichever fields are present win in priority order.
 	#summaryUrl(entry) {
 		const attrs = parseAttrs(entry);
 		const lines = [];
 		if (attrs.title) lines.push(`## ${attrs.title}`);
 		const meta = metadataLine(attrs);
 		if (meta) lines.push(meta);
-		const desc = attrs.description || attrs.excerpt;
+		const desc = attrs.content || attrs.excerpt;
 		if (desc) lines.push(desc);
 		return lines.join("\n");
 	}
@@ -355,34 +349,30 @@ function parseAttrs(entry) {
 		: entry.attributes;
 }
 
-// One-line metadata: "Publisher · 2014-08-12 · en · article". Reads
-// Brave's profile/page_age/language/subtype first, falls back to
-// Readability's siteName/byline. Empty pieces drop; if nothing remains
-// the caller skips emitting the line at all.
+// One-line metadata: "2024-08-12 · example.com". Date from SearXNG's
+// publishedDate; publisher from Readability (siteName/byline) since
+// SearXNG doesn't expose a publisher field. Empty pieces drop; if
+// nothing remains the caller skips the line.
 function metadataLine(attrs) {
 	const parts = [];
-	const publisher =
-		attrs.profile?.long_name ||
-		attrs.profile?.name ||
-		attrs.siteName ||
-		attrs.byline;
-	if (publisher) parts.push(publisher);
-	const date = attrs.page_age ? attrs.page_age.slice(0, 10) : attrs.age;
+	const date = attrs.publishedDate
+		? String(attrs.publishedDate).slice(0, 10)
+		: null;
 	if (date) parts.push(date);
-	if (attrs.language) parts.push(attrs.language);
-	const kind = attrs.subtype || attrs.content_type;
-	if (kind) parts.push(kind);
+	const publisher = attrs.siteName || attrs.byline;
+	if (publisher) parts.push(publisher);
 	return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 // Per-result block in the search log: bullet line + optional indented
-// metadata line + optional description. extra_snippets are deliberately
-// not rendered (more noise than signal in the listing).
-function renderResult({ url, title, tokens, brave }) {
+// date line + optional description.
+function renderResult({ url, title, tokens, src }) {
 	const head = title ? `${url} — ${title}` : url;
 	const lines = [`* ${head} (${tokens} tokens)`];
-	const meta = metadataLine(brave);
-	if (meta) lines.push(`  ${meta}`);
-	if (brave?.description) lines.push(`  ${brave.description}`);
+	const date = src?.publishedDate
+		? String(src.publishedDate).slice(0, 10)
+		: null;
+	if (date) lines.push(`  ${date}`);
+	if (src?.content) lines.push(`  ${src.content}`);
 	return lines;
 }

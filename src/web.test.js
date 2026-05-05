@@ -147,13 +147,13 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 					url: "https://a.example/page",
 					engine: "brave",
 					title: "Page A",
-					description: "description A",
+					content: "content A",
 				},
 				{
 					url: "https://b.example/page",
 					engine: "brave",
 					title: "Page B",
-					description: "description B",
+					content: "content B",
 				},
 			];
 			WebFetcher.prototype.fetchAll = async () => [
@@ -220,8 +220,8 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			);
 			assert.ok(logWrite.body.includes("Page A"), "title listed");
 			assert.ok(
-				logWrite.body.includes("description A"),
-				"Brave description listed",
+				logWrite.body.includes("content A"),
+				"SearXNG content listed",
 			);
 			assert.ok(
 				logWrite.body.includes("* https://b.example/page"),
@@ -256,9 +256,9 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 			const origSearch = WebFetcher.prototype.search;
 			const origFetchAll = WebFetcher.prototype.fetchAll;
 			WebFetcher.prototype.search = async () => [
-				{ url: "https://ok.example/page", title: "OK", description: "" },
-				{ url: "https://gone.example/404", title: "Gone", description: "" },
-				{ url: "https://timeout.example/page", title: "Slow", description: "" },
+				{ url: "https://ok.example/page", title: "OK", content: "" },
+				{ url: "https://gone.example/404", title: "Gone", content: "" },
+				{ url: "https://timeout.example/page", title: "Slow", content: "" },
 			];
 			WebFetcher.prototype.fetchAll = async () => [
 				{
@@ -843,10 +843,10 @@ describe("RummyWeb — run-end context cleanup", () => {
 	});
 });
 
-// Rich Brave metadata flows from `search` results through both the
+// SearXNG metadata flows from `search` results through both the
 // search-log listing and the per-URL archive attributes.
-describe("RummyWeb — Brave-rich rendering and refresh", () => {
-	it("search log entry renders metadata line and description; archives the full Brave attribute set", async () => {
+describe("RummyWeb — SearXNG-shape rendering and refresh", () => {
+	it("search log entry renders date + content; archives SearXNG fields alongside Readability ones", async () => {
 		const handler = captureHandler();
 		const setCalls = [];
 		const rummy = {
@@ -868,13 +868,11 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 			{
 				url: "https://a.example/page",
 				title: "Page A",
-				description: "Description A.",
-				page_age: "2024-08-12T10:00:00",
-				language: "en",
-				subtype: "article",
-				profile: { long_name: "Example Publisher" },
-				keywords: ["alpha", "beta"],
+				content: "Content A.",
+				publishedDate: "2024-08-12T10:00:00",
 				engine: "brave",
+				engines: ["brave"],
+				score: 1.0,
 			},
 		];
 		WebFetcher.prototype.fetchAll = async () => [
@@ -885,7 +883,7 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 					content: "x".repeat(400),
 					excerpt: null,
 					byline: null,
-					siteName: null,
+					siteName: "example.com",
 				},
 			},
 		];
@@ -902,35 +900,30 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 
 		const log = setCalls.find((c) => c.path === "log://turn_5/search/q");
 		assert.ok(log, "search wrote its log entry");
-		assert.match(
-			log.body,
-			/Example Publisher · 2024-08-12 · en · article/,
-			"metadata line shows publisher · date · lang · type",
-		);
 		assert.ok(
-			log.body.includes("Description A."),
-			"Brave description listed",
+			log.body.includes("2024-08-12"),
+			"date line shows publishedDate (sliced to YYYY-MM-DD)",
 		);
+		assert.ok(log.body.includes("Content A."), "SearXNG content listed");
 		assert.ok(
 			log.body.includes("Page A"),
-			"Brave title wins over Readability title",
+			"SearXNG title wins over Readability title",
 		);
 
-		const archived = setCalls.find(
-			(c) => c.path === "https://a.example/page",
-		);
+		const archived = setCalls.find((c) => c.path === "https://a.example/page");
 		assert.ok(archived, "result archived under its URL");
 		assert.equal(archived.attributes.title, "Page A");
-		assert.equal(archived.attributes.description, "Description A.");
-		assert.deepEqual(archived.attributes.keywords, ["alpha", "beta"]);
-		assert.equal(archived.attributes.profile.long_name, "Example Publisher");
-		assert.ok(
-			!("extra_snippets" in archived.attributes),
-			"extra_snippets is not persisted (more noise than signal)",
+		assert.equal(archived.attributes.content, "Content A.");
+		assert.equal(archived.attributes.publishedDate, "2024-08-12T10:00:00");
+		assert.equal(archived.attributes.engine, "brave");
+		assert.equal(
+			archived.attributes.siteName,
+			"example.com",
+			"Readability-side fields persisted alongside SearXNG-side ones",
 		);
 	});
 
-	it("<get> stale-refresh preserves Brave attributes the new fetch can't know", async () => {
+	it("<get> stale-refresh preserves SearXNG-side attributes the new fetch can't know", async () => {
 		const handlers = captureHandlers();
 		const handleGet = handlers.get;
 		const setCalls = [];
@@ -939,11 +932,9 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 			body: "old body",
 			attributes: {
 				title: "Old Title",
-				description: "Brave description",
-				profile: { long_name: "Example Publisher" },
-				keywords: ["alpha"],
-				language: "en",
-				subtype: "article",
+				content: "SearXNG content",
+				publishedDate: "2024-08-12T10:00:00",
+				engine: "brave",
 				excerpt: "old excerpt",
 				fetched_at: Date.now() - 11 * 60_000,
 			},
@@ -990,23 +981,21 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 		);
 		assert.equal(refreshed.attributes.title, "Refreshed Title");
 		assert.equal(refreshed.attributes.excerpt, "fresh excerpt");
-		// Brave fields the refresh fetch had no way to know — must persist.
+		// SearXNG fields the refresh fetch had no way to know — must persist.
 		assert.equal(
-			refreshed.attributes.description,
-			"Brave description",
-			"Brave description preserved across refresh",
+			refreshed.attributes.content,
+			"SearXNG content",
+			"SearXNG content preserved across refresh",
 		);
-		assert.equal(refreshed.attributes.profile.long_name, "Example Publisher");
-		assert.deepEqual(refreshed.attributes.keywords, ["alpha"]);
-		assert.equal(refreshed.attributes.language, "en");
-		assert.equal(refreshed.attributes.subtype, "article");
+		assert.equal(refreshed.attributes.publishedDate, "2024-08-12T10:00:00");
+		assert.equal(refreshed.attributes.engine, "brave");
 		assert.ok(
 			refreshed.attributes.fetched_at > Date.now() - 1000,
 			"fetched_at stamped fresh",
 		);
 	});
 
-	it("metadata line is omitted when every source field is empty", async () => {
+	it("metadata line is omitted when no date and no Readability publisher", async () => {
 		const handler = captureHandler();
 		const setCalls = [];
 		const rummy = {
@@ -1028,16 +1017,9 @@ describe("RummyWeb — Brave-rich rendering and refresh", () => {
 			{
 				url: "https://bare.example/page",
 				title: "Bare",
-				description: "",
-				page_age: null,
-				age: null,
-				language: null,
-				content_type: null,
-				subtype: null,
-				profile: null,
-				meta_url: null,
-				keywords: null,
-				engine: "searxng",
+				content: "",
+				publishedDate: null,
+				engine: "duckduckgo",
 			},
 		];
 		WebFetcher.prototype.fetchAll = async () => [
