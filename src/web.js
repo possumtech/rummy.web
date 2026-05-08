@@ -141,14 +141,17 @@ export default class RummyWeb {
 	}
 
 	async #runSearch(entry, rummy, fetcher, query, limit) {
-		// Per-run dedup: an identical query already executed this run
+		// Per-loop dedup: an identical query already executed this loop
 		// strikes hard rather than re-hitting SearXNG and re-fetching
-		// the same URLs. The prior listing's URLs are still archived in
-		// the run; the model must <get> one of them or refine the query.
-		// Lives here rather than #handleSearch so the abort listener
-		// armed above stays registered before any await — see the
-		// abort-mid-search test for the timing constraint.
-		const priorDup = await rummy.getEntries(searchDedupKey(query), null);
+		// the same URLs. A fresh loop is allowed to repeat the query —
+		// the marker path is loop-scoped. Lives here rather than
+		// #handleSearch so the abort listener armed above stays
+		// registered before any await — see the abort-mid-search test
+		// for the timing constraint.
+		const priorDup = await rummy.getEntries(
+			searchDedupKey(rummy.loopId, query),
+			null,
+		);
 		if (priorDup.length > 0) {
 			await rummy.hooks.error.log.emit({
 				store: rummy.entries,
@@ -266,13 +269,12 @@ export default class RummyWeb {
 			state: "resolved",
 			attributes: { query },
 		});
-		// Mark this query as run for the rest of the conversation so a
-		// repeat <search> for the exact same query strikes with 429 in
-		// #handleSearch. Archived so the marker never appears in the
-		// model's prompt; the existing log entry already carries the
-		// rendered listing.
+		// Mark this query as run for the rest of this loop so a repeat
+		// <search> for the exact same query strikes with 429 above.
+		// Archived so the marker never appears in the model's prompt;
+		// the existing log entry already carries the rendered listing.
 		await rummy.set({
-			path: searchDedupKey(query),
+			path: searchDedupKey(rummy.loopId, query),
 			body: query,
 			state: "resolved",
 			visibility: "archived",
@@ -370,12 +372,13 @@ export default class RummyWeb {
 	}
 }
 
-// Stable per-run dedup marker for a search query. Trim before encoding
-// so trivial whitespace differences don't mask a hit. encodeURIComponent
-// guarantees the result is a single path segment with no `/` or `*` to
-// confuse the per-turn `log://turn_*/search/*` glob.
-function searchDedupKey(query) {
-	return `log://search-dedup/${encodeURIComponent(query.trim())}`;
+// Stable per-loop dedup marker for a search query. Loop-scoped, not
+// run-scoped: a fresh loop in the same run is allowed to repeat a
+// prior loop's query. Trim before encoding so trivial whitespace
+// differences don't mask a hit; encodeURIComponent guarantees the
+// query segment has no `/` or `*` to confuse path-glob consumers.
+function searchDedupKey(loopId, query) {
+	return `log://search-dedup/${loopId}/${encodeURIComponent(query.trim())}`;
 }
 
 function parseAttrs(entry) {

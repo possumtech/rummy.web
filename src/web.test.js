@@ -325,6 +325,183 @@ describe("RummyWeb — one <search> per turn (@budget_enforcement)", () => {
 	});
 });
 
+// Per-loop dedup: identical query in the same loop strikes 429.
+// Marker is loop-scoped (`log://search-dedup/<loopId>/<encoded>`) so a
+// fresh loop in the same run is allowed to repeat a prior loop's query.
+describe("RummyWeb — per-loop search dedup", () => {
+	it("identical query in the same loop strikes 429 with terse message; no fetcher.search call, no listing write", async () => {
+		const handler = captureHandler();
+		const setCalls = [];
+		const emitted = [];
+		const dedupPath = "log://search-dedup/1/the%20query";
+		const rummy = {
+			runId: 1,
+			loopId: 1,
+			sequence: 5,
+			signal: new AbortController().signal,
+			entries: { set: async () => {} },
+			getEntries: async (path) => {
+				if (path === dedupPath) return [{ path: dedupPath }];
+				return [];
+			},
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: {
+				error: { log: { emit: async (p) => emitted.push(p) } },
+			},
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origSearch = WebFetcher.prototype.search;
+		const searchCalls = [];
+		WebFetcher.prototype.search = async () => {
+			searchCalls.push(true);
+			return [];
+		};
+
+		try {
+			await handler(
+				{
+					attributes: { path: "the query" },
+					resultPath: "log://turn_5/search/the%20query",
+				},
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.search = origSearch;
+		}
+
+		assert.equal(
+			searchCalls.length,
+			0,
+			"fetcher.search must not fire on a dedup hit",
+		);
+		assert.equal(emitted.length, 1, "exactly one strike emitted");
+		assert.equal(emitted[0].status, 429, "429 status");
+		assert.equal(
+			emitted[0].message,
+			"duplicated search request",
+			"verbatim terse message",
+		);
+		const listing = setCalls.find(
+			(c) => c.path === "log://turn_5/search/the%20query",
+		);
+		assert.equal(listing, undefined, "no listing written on dedup hit");
+	});
+
+	it("first-time search writes a loop-scoped dedup marker (archived)", async () => {
+		const handler = captureHandler();
+		const setCalls = [];
+		const rummy = {
+			runId: 1,
+			loopId: 7,
+			sequence: 5,
+			signal: new AbortController().signal,
+			entries: { set: async () => {} },
+			getEntries: async () => [],
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async () => {} } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origSearch = WebFetcher.prototype.search;
+		const origFetchAll = WebFetcher.prototype.fetchAll;
+		WebFetcher.prototype.search = async () => [
+			{ url: "https://a.example/page", title: "A", content: "" },
+		];
+		WebFetcher.prototype.fetchAll = async () => [
+			{
+				status: "fulfilled",
+				value: { title: "A", content: "x", excerpt: null },
+			},
+		];
+
+		try {
+			await handler(
+				{
+					attributes: { path: "the query" },
+					resultPath: "log://turn_5/search/the%20query",
+				},
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.search = origSearch;
+			WebFetcher.prototype.fetchAll = origFetchAll;
+		}
+
+		const marker = setCalls.find(
+			(c) => c.path === "log://search-dedup/7/the%20query",
+		);
+		assert.ok(marker, "marker written under loop-scoped path");
+		assert.equal(marker.visibility, "archived", "marker hidden from prompt");
+		assert.equal(marker.attributes.query, "the query");
+	});
+
+	it("identical query under a different loopId is allowed (no false-positive across loops)", async () => {
+		const handler = captureHandler();
+		const setCalls = [];
+		const emitted = [];
+		const rummy = {
+			runId: 1,
+			loopId: 2, // current loop
+			sequence: 5,
+			signal: new AbortController().signal,
+			entries: { set: async () => {} },
+			// A prior loop (id=1) marker exists, but this loop (id=2)
+			// queries its own loop-scoped path and finds nothing.
+			getEntries: async (path) => {
+				if (path === "log://search-dedup/1/the%20query") {
+					return [{ path: "log://search-dedup/1/the%20query" }];
+				}
+				return [];
+			},
+			set: async (payload) => setCalls.push(payload),
+			getAttributes: async () => null,
+			hooks: { error: { log: { emit: async (p) => emitted.push(p) } } },
+		};
+
+		const WebFetcher = (await import("./WebFetcher.js")).default;
+		const origSearch = WebFetcher.prototype.search;
+		const origFetchAll = WebFetcher.prototype.fetchAll;
+		const searchCalls = [];
+		WebFetcher.prototype.search = async (q) => {
+			searchCalls.push(q);
+			return [{ url: "https://a.example/page", title: "A", content: "" }];
+		};
+		WebFetcher.prototype.fetchAll = async () => [
+			{
+				status: "fulfilled",
+				value: { title: "A", content: "x", excerpt: null },
+			},
+		];
+
+		try {
+			await handler(
+				{
+					attributes: { path: "the query" },
+					resultPath: "log://turn_5/search/the%20query",
+				},
+				rummy,
+			);
+		} finally {
+			WebFetcher.prototype.search = origSearch;
+			WebFetcher.prototype.fetchAll = origFetchAll;
+		}
+
+		assert.deepEqual(
+			searchCalls,
+			["the query"],
+			"fetcher.search runs in the new loop",
+		);
+		assert.equal(emitted.length, 0, "no 429 across loops");
+		assert.ok(
+			setCalls.some((c) => c.path === "log://search-dedup/2/the%20query"),
+			"new loop writes its own loop-scoped marker",
+		);
+	});
+});
+
 // Per-URL cache: an http/https entry younger than CACHE_TTL_MS is served
 // from its existing archived body — same rule for both <get> and search.
 describe("RummyWeb — http/https cache (10 min TTL)", () => {

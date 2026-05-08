@@ -142,4 +142,109 @@ describe("WebFetcher", () => {
 			await bPromise;
 		});
 	});
+
+	// search() returns SearXNG's native per-result shape verbatim and wraps
+	// every failure mode with host + query preview so dispatch logs are
+	// actionable. Stubs globalThis.fetch — no chromium, no real network.
+	describe("search", () => {
+		const origFetch = globalThis.fetch;
+		const origUrl = process.env.RUMMY_WEB_SEARXNG_URL;
+		let fetcher;
+
+		before(() => {
+			process.env.RUMMY_WEB_SEARXNG_URL = "https://searxng.test";
+			fetcher = new WebFetcher();
+		});
+
+		after(async () => {
+			globalThis.fetch = origFetch;
+			if (origUrl === undefined) delete process.env.RUMMY_WEB_SEARXNG_URL;
+			else process.env.RUMMY_WEB_SEARXNG_URL = origUrl;
+			await fetcher.close();
+		});
+
+		it("returns SearXNG results sliced to limit", async () => {
+			const results = Array.from({ length: 20 }, (_, i) => ({
+				url: `https://e${i}.test/p`,
+				title: `T${i}`,
+			}));
+			globalThis.fetch = async () =>
+				new Response(JSON.stringify({ results }), { status: 200 });
+			const out = await fetcher.search("the query", { limit: 5 });
+			assert.equal(out.length, 5);
+			assert.equal(out[0].url, "https://e0.test/p");
+			assert.equal(out[4].url, "https://e4.test/p");
+		});
+
+		it("non-OK response wraps with status, statusText, host, and query preview", async () => {
+			globalThis.fetch = async () =>
+				new Response("nope", {
+					status: 503,
+					statusText: "Service Unavailable",
+				});
+			await assert.rejects(
+				() => fetcher.search("the query"),
+				/SearXNG 503 Service Unavailable — host=searxng\.test query="the query"/,
+			);
+		});
+
+		it("TimeoutError wraps with FETCH_TIMEOUT, host, and query preview; preserves cause", async () => {
+			const cause = new Error("operation timed out");
+			cause.name = "TimeoutError";
+			globalThis.fetch = async () => {
+				throw cause;
+			};
+			await assert.rejects(
+				() => fetcher.search("the query"),
+				(err) => {
+					assert.match(
+						err.message,
+						/SearXNG timeout after \d+ms — host=searxng\.test query="the query"/,
+					);
+					assert.equal(err.cause, cause, "original error preserved as cause");
+					return true;
+				},
+			);
+		});
+
+		it("connection error unwraps err.cause for code + detail; preserves cause", async () => {
+			const cause = new Error("getaddrinfo ENOTFOUND searxng.test");
+			cause.code = "ENOTFOUND";
+			const err = new Error("fetch failed", { cause });
+			globalThis.fetch = async () => {
+				throw err;
+			};
+			await assert.rejects(
+				() => fetcher.search("the query"),
+				(thrown) => {
+					assert.match(
+						thrown.message,
+						/SearXNG fetch failed \[ENOTFOUND\] — getaddrinfo ENOTFOUND searxng\.test; host=searxng\.test query="the query"/,
+					);
+					assert.equal(thrown.cause, err, "original error preserved as cause");
+					return true;
+				},
+			);
+		});
+
+		it("missing err.cause falls back to UNKNOWN code + err.message", async () => {
+			globalThis.fetch = async () => {
+				throw new Error("something broke");
+			};
+			await assert.rejects(
+				() => fetcher.search("the query"),
+				/SearXNG fetch failed \[UNKNOWN\] — something broke; host=searxng\.test query="the query"/,
+			);
+		});
+
+		it("long queries are truncated to 60 chars + … in the error preview", async () => {
+			globalThis.fetch = async () =>
+				new Response("nope", { status: 500, statusText: "Internal" });
+			const long = "x".repeat(80);
+			await assert.rejects(
+				() => fetcher.search(long),
+				new RegExp(`query="${"x".repeat(60)}…"`),
+			);
+		});
+	});
 });
