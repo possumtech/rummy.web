@@ -323,11 +323,36 @@ export default class WebFetcher {
 		url.searchParams.set("format", "json");
 		url.searchParams.set("language", language);
 
-		const response = await fetch(url, {
-			signal: AbortSignal.timeout(FETCH_TIMEOUT),
-		});
+		const queryPreview = query.length > 60 ? `${query.slice(0, 60)}…` : query;
+
+		let response;
+		try {
+			response = await fetch(url, {
+				signal: AbortSignal.timeout(FETCH_TIMEOUT),
+			});
+		} catch (err) {
+			// Node's fetch() throws bare `fetch failed` and tucks the real
+			// reason under err.cause. Surface the cause-level details so a
+			// dispatch crash log says ENOTFOUND/ECONNREFUSED/CERT_*/etc.
+			// instead of "fetch failed" with no actionable info.
+			if (err.name === "AbortError" || err.name === "TimeoutError") {
+				throw new Error(
+					`SearXNG timeout after ${FETCH_TIMEOUT}ms — host=${url.host} query="${queryPreview}"`,
+					{ cause: err },
+				);
+			}
+			const cause = err.cause;
+			const code = cause?.code || err.code || "UNKNOWN";
+			const detail = cause?.message || err.message;
+			throw new Error(
+				`SearXNG fetch failed [${code}] — ${detail}; host=${url.host} query="${queryPreview}"`,
+				{ cause: err },
+			);
+		}
 		if (!response.ok) {
-			throw new Error(`SearXNG ${response.status}: ${response.statusText}`);
+			throw new Error(
+				`SearXNG ${response.status} ${response.statusText} — host=${url.host} query="${queryPreview}"`,
+			);
 		}
 		const data = await response.json();
 		return (data.results || []).slice(0, limit);

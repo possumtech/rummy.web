@@ -141,6 +141,26 @@ export default class RummyWeb {
 	}
 
 	async #runSearch(entry, rummy, fetcher, query, limit) {
+		// Per-run dedup: an identical query already executed this run
+		// strikes hard rather than re-hitting SearXNG and re-fetching
+		// the same URLs. The prior listing's URLs are still archived in
+		// the run; the model must <get> one of them or refine the query.
+		// Lives here rather than #handleSearch so the abort listener
+		// armed above stays registered before any await — see the
+		// abort-mid-search test for the timing constraint.
+		const priorDup = await rummy.getEntries(searchDedupKey(query), null);
+		if (priorDup.length > 0) {
+			await rummy.hooks.error.log.emit({
+				store: rummy.entries,
+				runId: rummy.runId,
+				turn: rummy.sequence,
+				loopId: rummy.loopId,
+				message: "duplicated search request",
+				status: 429,
+			});
+			return;
+		}
+
 		const results = await fetcher.search(query, { limit });
 
 		// Fetch each candidate in parallel and STORE the body as an
@@ -246,6 +266,18 @@ export default class RummyWeb {
 			state: "resolved",
 			attributes: { query },
 		});
+		// Mark this query as run for the rest of the conversation so a
+		// repeat <search> for the exact same query strikes with 429 in
+		// #handleSearch. Archived so the marker never appears in the
+		// model's prompt; the existing log entry already carries the
+		// rendered listing.
+		await rummy.set({
+			path: searchDedupKey(query),
+			body: query,
+			state: "resolved",
+			visibility: "archived",
+			attributes: { query },
+		});
 	}
 
 	async #handleGet(entry, rummy) {
@@ -336,6 +368,14 @@ export default class RummyWeb {
 	#summarySearch(entry) {
 		return parseAttrs(entry).query || "";
 	}
+}
+
+// Stable per-run dedup marker for a search query. Trim before encoding
+// so trivial whitespace differences don't mask a hit. encodeURIComponent
+// guarantees the result is a single path segment with no `/` or `*` to
+// confuse the per-turn `log://turn_*/search/*` glob.
+function searchDedupKey(query) {
+	return `log://search-dedup/${encodeURIComponent(query.trim())}`;
 }
 
 function parseAttrs(entry) {
