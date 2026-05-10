@@ -42,8 +42,16 @@ export default class RummyWeb {
 		core.registerScheme({ name: "http", category: "data" });
 		core.registerScheme({ name: "https", category: "data" });
 		hooks.tools.onHandle("search", this.#handleSearch.bind(this));
-		hooks.tools.onView("search", this.#viewSearch.bind(this), "visible");
-		hooks.tools.onView("search", this.#summarySearch, "summarized");
+		// Search action-log: body is the rendered results listing the model
+		// asked for. Tab-indent recap via core.projection.emission so the
+		// search entry matches every other action's projection shape.
+		const { emission, summarize } = core.projection;
+		hooks.tools.onView("search", (entry) => emission(entry.body), "visible");
+		hooks.tools.onView(
+			"search",
+			(entry) => summarize(entry.body),
+			"summarized",
+		);
 
 		hooks.tools.onView("http", (entry) => entry.body, "visible");
 		hooks.tools.onView("http", this.#summaryUrl, "summarized");
@@ -360,15 +368,6 @@ export default class RummyWeb {
 		const desc = attrs.content || attrs.excerpt;
 		if (desc) lines.push(desc);
 		return lines.join("\n");
-	}
-
-	#viewSearch(entry) {
-		const attrs = parseAttrs(entry);
-		return `# search "${attrs.query || ""}"\n${entry.body}`;
-	}
-
-	#summarySearch(entry) {
-		return parseAttrs(entry).query || "";
 	}
 }
 

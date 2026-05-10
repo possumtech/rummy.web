@@ -5,8 +5,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import RummyWeb from "./web.js";
 
-function captureHandlers() {
+function captureHandlers({ projection } = {}) {
 	const handlers = {};
+	const views = { visible: {}, summarized: {} };
 	const completedListeners = { act: [], ask: [] };
 	const makeEvent = (channel) => ({
 		on: (fn) => completedListeners[channel].push(fn),
@@ -18,7 +19,9 @@ function captureHandlers() {
 				onHandle: (scheme, fn) => {
 					handlers[scheme] = fn;
 				},
-				onView: () => {},
+				onView: (scheme, fn, mode) => {
+					views[mode][scheme] = fn;
+				},
 			},
 			act: { completed: makeEvent("act") },
 			ask: { completed: makeEvent("ask") },
@@ -26,11 +29,13 @@ function captureHandlers() {
 		registerScheme: () => {},
 		on: () => {},
 		filter: () => {},
+		projection: projection || { emission: (s) => s, summarize: (s) => s },
 	};
 	new RummyWeb(core);
 	handlers._fireCompleted = (channel, payload) => {
 		for (const fn of completedListeners[channel]) fn(payload);
 	};
+	handlers._views = views;
 	return handlers;
 }
 
@@ -1227,6 +1232,61 @@ describe("RummyWeb — SearXNG-shape rendering and refresh", () => {
 		assert.ok(
 			next === undefined || next === "" || next.startsWith("* "),
 			`expected no metadata indent line after bare bullet, got: ${JSON.stringify(next)}`,
+		);
+	});
+});
+
+// Search action-log views delegate to core.projection so the search
+// entry shares the action-log emission shape (tab-indented body for
+// heredoc safety; summary capped). Per-plugin framing was removed.
+describe("RummyWeb — search projection wiring", () => {
+	it("visible view passes entry.body through core.projection.emission", () => {
+		const calls = [];
+		const handlers = captureHandlers({
+			projection: {
+				emission: (body) => {
+					calls.push(["emission", body]);
+					return `EMIT(${body})`;
+				},
+				summarize: (body) => {
+					calls.push(["summarize", body]);
+					return `SUM(${body})`;
+				},
+			},
+		});
+		const visible = handlers._views.visible.search;
+		assert.equal(typeof visible, "function", "visible view registered");
+		const out = visible({ body: "1 results for \"q\"\n* https://e/x" });
+		assert.equal(out, 'EMIT(1 results for "q"\n* https://e/x)');
+		assert.deepEqual(
+			calls,
+			[["emission", '1 results for "q"\n* https://e/x']],
+			"emission called once with entry.body verbatim",
+		);
+	});
+
+	it("summarized view passes entry.body through core.projection.summarize", () => {
+		const calls = [];
+		const handlers = captureHandlers({
+			projection: {
+				emission: (body) => {
+					calls.push(["emission", body]);
+					return `EMIT(${body})`;
+				},
+				summarize: (body) => {
+					calls.push(["summarize", body]);
+					return `SUM(${body})`;
+				},
+			},
+		});
+		const summarized = handlers._views.summarized.search;
+		assert.equal(typeof summarized, "function", "summarized view registered");
+		const out = summarized({ body: "1 results for \"q\"" });
+		assert.equal(out, 'SUM(1 results for "q")');
+		assert.deepEqual(
+			calls,
+			[["summarize", '1 results for "q"']],
+			"summarize called once with entry.body verbatim",
 		);
 	});
 });
